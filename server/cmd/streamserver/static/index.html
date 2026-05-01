@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>3DS Stream Server</title>
+</head>
+<body>
+
+<h1>3DS Stream Server</h1>
+
+<p id="serverStatus">Checking…</p>
+
+<h2>Control</h2>
+<form onsubmit="return false;">
+  <p>
+    Source:<br>
+    <input id="source" type="text" size="40" placeholder="e.g. /dev/video0">
+  </p>
+  <p>
+    Client Address:<br>
+    <input id="clientAddr" type="text" size="40" placeholder="e.g. 192.168.1.42:1108">
+  </p>
+  <p>
+    <button onclick="doPlay()">Play</button>
+    <button onclick="doStop()">Stop</button>
+    <button onclick="doKeyframe()">Keyframe</button>
+  </p>
+</form>
+<p id="controlStatus"></p>
+
+<h2>Stats</h2>
+<p>
+  <button onclick="loadStats()">Refresh Stats</button>
+</p>
+<table border="1" cellpadding="6">
+  <tr><th>Metric</th><th>Value</th></tr>
+  <tr><td>Frames sent</td><td id="stFrames">—</td></tr>
+  <tr><td>NALs sent</td><td id="stNALs">—</td></tr>
+  <tr><td>Client</td><td id="stClient">—</td></tr>
+</table>
+<pre id="rawStats">{}</pre>
+
+<script>
+function api(method, path, body) {
+  const opts = { method: method, headers: {} };
+  if (body) {
+    opts.headers['Content-Type'] = 'application/json';
+    opts.body = JSON.stringify(body);
+  }
+  return fetch(path, opts).then(function(r) {
+    return r.text().then(function(t) {
+      try { return { ok: r.ok, status: r.status, data: t ? JSON.parse(t) : {} }; }
+      catch (e) { return { ok: r.ok, status: r.status, data: t }; }
+    });
+  }).catch(function(e) {
+    return { ok: false, status: 0, data: { error: e.message } };
+  });
+}
+
+function checkServer() {
+  fetch('/health').then(function(r) { return r.text(); }).then(function(t) {
+    document.getElementById('serverStatus').textContent = t;
+  }).catch(function(e) {
+    document.getElementById('serverStatus').textContent = 'Unreachable: ' + e.message;
+  });
+}
+
+function setCtrl(msg, isErr) {
+  document.getElementById('controlStatus').textContent = msg;
+}
+
+function doPlay() {
+  var source = document.getElementById('source').value.trim();
+  var clientAddr = document.getElementById('clientAddr').value.trim();
+  if (!source || !clientAddr) {
+    setCtrl('Source and Client Address are required.', true);
+    return;
+  }
+  setCtrl('Starting…', false);
+  api('POST', '/play', { source: source, client_addr: clientAddr }).then(function(res) {
+    setCtrl(res.ok ? 'Playing' : 'Error ' + res.status + ': ' + JSON.stringify(res.data), !res.ok);
+    if (res.ok) loadStats();
+  });
+}
+
+function doStop() {
+  setCtrl('Stopping…', false);
+  api('POST', '/stop').then(function(res) {
+    setCtrl(res.ok ? 'Stopped' : 'Error ' + res.status + ': ' + JSON.stringify(res.data), !res.ok);
+    if (res.ok) loadStats();
+  });
+}
+
+function doKeyframe() {
+  setCtrl('Requesting keyframe…', false);
+  api('POST', '/keyframe').then(function(res) {
+    setCtrl(res.ok ? 'Keyframe requested' : 'Error ' + res.status + ': ' + JSON.stringify(res.data), !res.ok);
+  });
+}
+
+function loadStats() {
+  api('GET', '/stats').then(function(res) {
+    if (res.ok) {
+      document.getElementById('stFrames').textContent = res.data.frames_sent != null ? res.data.frames_sent : 0;
+      document.getElementById('stNALs').textContent = res.data.nals_sent != null ? res.data.nals_sent : 0;
+      document.getElementById('stClient').textContent = res.data.client_addr || '—';
+      document.getElementById('rawStats').textContent = JSON.stringify(res.data, null, 2);
+    } else {
+      document.getElementById('stFrames').textContent = '—';
+      document.getElementById('stNALs').textContent = '—';
+      document.getElementById('stClient').textContent = '—';
+      document.getElementById('rawStats').textContent = JSON.stringify(res.data, null, 2);
+    }
+  });
+}
+
+checkServer();
+loadStats();
+setInterval(function() { checkServer(); loadStats(); }, 2000);
+</script>
+
+</body>
+</html>
