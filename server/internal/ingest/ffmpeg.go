@@ -8,8 +8,8 @@ import (
 	"os/exec"
 )
 
-// FrameBytes is the size of one 400×240 YUV420p frame.
-const FrameBytes = 400 * 240 * 3 / 2 // 144000
+// FrameBytes is the size of one 256×192 YUV420p frame.
+const FrameBytes = 256 * 192 * 3 / 2 // 73728
 
 func Run(ctx context.Context, sourceURL string, out chan<- []byte) error {
 	probeArgs := []string{"-fflags", "nobuffer", "-flags", "low_delay",
@@ -23,9 +23,9 @@ func Run(ctx context.Context, sourceURL string, out chan<- []byte) error {
 	args = append(args,
 		"-i", sourceURL,
 		"-an", "-sn", "-dn",
-		"-vf", "scale=400:240:flags=fast_bilinear,format=yuv420p",
+		"-vf", "scale=256:192:flags=fast_bilinear,format=yuv420p",
 		"-f", "rawvideo", "-pix_fmt", "yuv420p",
-		"-r", "30",
+		"-r", "20",
 		"pipe:1",
 	)
 

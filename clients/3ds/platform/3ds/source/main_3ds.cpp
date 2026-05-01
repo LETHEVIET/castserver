@@ -61,18 +61,18 @@ int main(int argc, char **argv) {
         if (http_ctrl_init(SERVER_HOST, SERVER_HTTP_PORT) >= 0) http_ok = true;
     }
 
-    // ---- Texture ----
+    // ---- Texture (sized to stream resolution, not screen) ----
     render_splash(top, "Init: texture...", GUI_WHITE);
     {
         Result_with_string r = Draw_c2d_image_init(&stream_img, TEX_WIDTH, TEX_HEIGHT, GPU_RGB565);
         if (r.code == 0) {
             tex_ok = true;
-            stream_img.subtex->width  = (u16)TOP_SCREEN_WIDTH;
-            stream_img.subtex->height = (u16)TOP_SCREEN_HEIGHT;
+            stream_img.subtex->width  = (u16)STREAM_WIDTH;
+            stream_img.subtex->height = (u16)STREAM_HEIGHT;
             stream_img.subtex->left   = 0.0f;
             stream_img.subtex->top    = 1.0f;
-            stream_img.subtex->right  = (float)TOP_SCREEN_WIDTH  / TEX_WIDTH;
-            stream_img.subtex->bottom = 1.0f - (float)TOP_SCREEN_HEIGHT / TEX_HEIGHT;
+            stream_img.subtex->right  = (float)STREAM_WIDTH  / TEX_WIDTH;
+            stream_img.subtex->bottom = 1.0f - (float)STREAM_HEIGHT / (float)TEX_HEIGHT;
             stream_img.c2d.subtex     = stream_img.subtex;
         }
     }
@@ -108,22 +108,19 @@ int main(int argc, char **argv) {
         if (kDown & KEY_X) gui_set_overlay_visible(!gui_overlay_visible());
         if (kDown & KEY_Y) gui_set_debug_visible(!gui_debug_visible());
 
+        // Drain all pending UDP datagrams — only the latest complete frame
+        // survives in the reassembly buffer, discarding stale frames.
         bool got_frame = false;
-        if (udp_ok) {
+        if (udp_ok && yuv_ok && tex_ok) {
             udp_rx_drain();
             uint32_t frame_size = 0;
             const uint8_t *frame_data = udp_rx_take_frame(&frame_size);
-            if (frame_data) {
-                if (frame_size == YUV_FRAME_SIZE && tex_ok && yuv_ok) {
-                    got_frame = true;
-                    decoded_count++;
-                    yuv_render_frame(&stream_img, frame_data,
-                                     TOP_SCREEN_WIDTH, TOP_SCREEN_HEIGHT);
-                    C3D_TexFlush(stream_img.c2d.tex);
-                } else if (frame_size != YUV_FRAME_SIZE) {
-                    Log("main: bad frame size %u (expected %d)\n",
-                        frame_size, YUV_FRAME_SIZE);
-                }
+            if (frame_data && frame_size == YUV_FRAME_SIZE) {
+                yuv_render_frame(&stream_img, frame_data);
+                got_frame = true;
+                decoded_count++;
+            } else if (frame_data && frame_size != 0) {
+                Log("main: bad frame %u (expected %d)\n", frame_size, YUV_FRAME_SIZE);
             }
         }
         if (got_frame) displayed_count++;
@@ -143,14 +140,16 @@ int main(int argc, char **argv) {
         C2D_TargetClear(top, C2D_Color32(0, 0, 0, 255));
         C2D_SceneBegin(top);
 
-        if (tex_ok) {
+        // Upscale the stream texture to fill the 400x240 top screen.
+        // The GPU bilinear filter gives decent quality from 256x192.
+        if (tex_ok && decoded_count > 0) {
             Draw_texture(stream_img.c2d, 0.0f, 0.0f,
                          (float)TOP_SCREEN_WIDTH, (float)TOP_SCREEN_HEIGHT);
         }
 
         gui_draw();
 
-        if (!got_frame && net_ok && udp_ok) {
+        if (decoded_count == 0 && net_ok && udp_ok) {
             char l1[64], l2[64];
             snprintf(l1, sizeof(l1), "Waiting for stream...");
             snprintf(l2, sizeof(l2), "Server -> %s:%d", my_ip, UDP_RECV_PORT);

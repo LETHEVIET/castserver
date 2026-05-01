@@ -35,7 +35,7 @@ typedef struct {
 
     // Status strings (updated each frame)
     char status_line[64];   // e.g. "Connected  |  192.168.1.42:8001"
-    char stream_info[64];   // e.g. "400x240  |  30 FPS"
+    char stream_info[64];   // e.g. "256x192  |  20 FPS"
     char debug_line[64];    // e.g. "Frames: 1234  Dropped: 0"
 
     // UDP diagnostics

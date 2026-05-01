@@ -133,7 +133,7 @@ endif()
 # ---- SMDH + 3DSX ----------------------------------------------------------
 
 set(APP_TITLE       "3DS Streaming")
-set(APP_DESCRIPTION "H.264 LAN video streaming")
+set(APP_DESCRIPTION "YUV420p LAN video streaming")
 set(APP_AUTHOR      "User")
 set(APP_ICON        "${DEVKITPRO}/libctru/default_icon.png")
 

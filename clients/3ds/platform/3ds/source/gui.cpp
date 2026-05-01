@@ -63,7 +63,7 @@ void gui_update_frame(bool connected, const char *ip, int port) {
 
     // ---- Stream info ----
     snprintf(s_state.stream_info, sizeof(s_state.stream_info),
-             "400x240  |  %d FPS", s_state.fps);
+             "256x192  |  %d FPS", s_state.fps);
 
     // ---- Debug line ----
     snprintf(s_state.debug_line, sizeof(s_state.debug_line),
