@@ -63,9 +63,6 @@ func main() {
         }
         http.ServeFileFS(w, r, staticFS, "static/index.html")
     })
-    mux.HandleFunc("/cast.html", func(w http.ResponseWriter, r *http.Request) {
-        http.ServeFileFS(w, r, staticFS, "static/cast.html")
-    })
 
     mux.HandleFunc("/play", func(w http.ResponseWriter, r *http.Request) {
         if r.Method != http.MethodPost {

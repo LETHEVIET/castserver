@@ -18,6 +18,7 @@
   button { padding: 6px 14px; margin-right: 8px; cursor: pointer; }
   .hidden { display: none; }
   label { display: inline-block; min-width: 100px; font-weight: bold; }
+  #castPreview { max-width: 100%; border: 1px solid #ddd; border-radius: 4px; margin-top: 10px; display: none; }
 </style>
 </head>
 <body>
@@ -97,13 +98,16 @@
     <button id="playBtn" onclick="doPlay()">Play</button>
     <button onclick="doStop()">Stop</button>
     <button onclick="doKeyframe()">Keyframe</button>
+    <button id="castBtn" onclick="startCast()">Cast Tab/Screen</button>
+    <button id="castStopBtn" onclick="stopCast()" disabled>Stop Cast</button>
+  </p>
+  <p class="hint">
+    <strong>Play</strong> ingests the source above on the server.
+    <strong>Cast Tab/Screen</strong> shares this browser's screen/tab and pipes it to the 3DS — uses the resolution, fps, and client above.
   </p>
   <p id="controlStatus"></p>
+  <video id="castPreview" autoplay muted playsinline></video>
 </div>
-
-<h2>Browser Cast</h2>
-<p>Stream your screen or a browser tab directly — no ffmpeg or file paths needed.</p>
-<p><a href="/cast.html" style="font-size: 1.1em; font-weight: bold;">→ Open Cast Page</a></p>
 
 <h2>Quick Start</h2>
 
@@ -262,6 +266,131 @@ function doKeyframe() {
   setCtrl('Requesting keyframe…', false);
   api('POST', '/keyframe').then(function(res) {
     setCtrl(res.ok ? 'Keyframe requested' : 'Error ' + res.status + ': ' + JSON.stringify(res.data), !res.ok);
+  });
+}
+
+// ---------- Browser cast (screen / tab capture) ----------
+var castWs = null, castRecorder = null, castStream = null;
+
+function getCastMimeType() {
+  var types = ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm'];
+  for (var i = 0; i < types.length; i++) {
+    if (window.MediaRecorder && MediaRecorder.isTypeSupported(types[i])) return types[i];
+  }
+  return null;
+}
+
+function castCleanup() {
+  if (castRecorder && castRecorder.state !== 'inactive') {
+    try { castRecorder.stop(); } catch (e) {}
+  }
+  if (castStream) {
+    castStream.getTracks().forEach(function(t) { t.stop(); });
+    castStream = null;
+  }
+  if (castWs) {
+    try { castWs.close(); } catch (e) {}
+    castWs = null;
+  }
+  castRecorder = null;
+  var prev = document.getElementById('castPreview');
+  prev.style.display = 'none';
+  prev.srcObject = null;
+  document.getElementById('castBtn').disabled = false;
+  document.getElementById('castStopBtn').disabled = true;
+}
+
+function stopCast() {
+  setCtrl('Cast stopped', false);
+  castCleanup();
+}
+
+function startCast() {
+  var clientAddr = document.getElementById('clientAddr').value.trim();
+  if (!clientAddr) {
+    setCtrl('Client Address is required.', true);
+    return;
+  }
+  var mimeType = getCastMimeType();
+  if (!mimeType) {
+    setCtrl('MediaRecorder is not supported in this browser.', true);
+    return;
+  }
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
+    setCtrl('getDisplayMedia is not available in this browser.', true);
+    return;
+  }
+
+  var resVal = document.getElementById('resolution').value.split('x');
+  var width  = parseInt(resVal[0], 10);
+  var height = parseInt(resVal[1], 10);
+  var fps    = parseInt(document.getElementById('fps').value, 10);
+
+  document.getElementById('castBtn').disabled = true;
+  setCtrl('Requesting screen capture…', false);
+
+  navigator.mediaDevices.getDisplayMedia({
+    video: { frameRate: { ideal: fps } },
+    audio: false,
+  }).then(function(s) {
+    castStream = s;
+    castStream.getAudioTracks().forEach(function(t) { castStream.removeTrack(t); });
+
+    var prev = document.getElementById('castPreview');
+    prev.srcObject = castStream;
+    prev.style.display = 'block';
+
+    var proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    var wsUrl = proto + '//' + window.location.host + '/ws/cast';
+
+    setCtrl('Connecting to server…', false);
+    castWs = new WebSocket(wsUrl);
+    castWs.binaryType = 'arraybuffer';
+
+    castWs.onopen = function() {
+      castWs.send(JSON.stringify({
+        client_addr: clientAddr,
+        width: width,
+        height: height,
+        fps: fps,
+      }));
+
+      castRecorder = new MediaRecorder(castStream, {
+        mimeType: mimeType,
+        videoBitsPerSecond: 800000,
+      });
+      castRecorder.ondataavailable = function(e) {
+        if (e.data.size > 0 && castWs && castWs.readyState === WebSocket.OPEN) {
+          e.data.arrayBuffer().then(function(buf) { castWs.send(buf); });
+        }
+      };
+      castRecorder.onerror = function(e) {
+        setCtrl('Recorder error: ' + (e.message || 'unknown'), true);
+        castCleanup();
+      };
+      castRecorder.start(100);
+
+      document.getElementById('castStopBtn').disabled = false;
+      setCtrl('Casting to ' + clientAddr + ' (' + width + 'x' + height + '@' + fps + ')', false);
+      loadStats();
+    };
+
+    castWs.onerror = function() {
+      setCtrl('WebSocket error.', true);
+      castCleanup();
+    };
+    castWs.onclose = function() {
+      // Only surface the closure if we didn't trigger it via stopCast().
+      if (castWs !== null) {
+        setCtrl('Cast connection closed.', false);
+        castCleanup();
+      }
+    };
+
+    castStream.getVideoTracks()[0].onended = function() { stopCast(); };
+  }).catch(function(err) {
+    setCtrl('Cast failed: ' + err.message, true);
+    document.getElementById('castBtn').disabled = false;
   });
 }
 

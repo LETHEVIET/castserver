@@ -26,6 +26,9 @@ var upgrader = websocket.Upgrader{
 // Config is the first (text) message sent by the browser.
 type Config struct {
 	ClientAddr string `json:"client_addr"`
+	Width      int    `json:"width"`
+	Height     int    `json:"height"`
+	FPS        int    `json:"fps"`
 }
 
 // Handler returns an http.HandlerFunc that upgrades HTTP to WebSocket
@@ -59,7 +62,27 @@ func Handler(ctrl *control.Handler, localAddr string) http.HandlerFunc {
 			return
 		}
 
-		log.Printf("cast: starting stream to %s", cfg.ClientAddr)
+		// Resolve stream config: prefer values sent by the browser; fall
+		// back to whatever /play last set; finally to safe defaults.
+		sw, sh, sfps := cfg.Width, cfg.Height, cfg.FPS
+		if sw <= 0 || sh <= 0 || sfps <= 0 {
+			gw, gh, gf := ctrl.GetStreamConfig()
+			if sw <= 0 || sh <= 0 {
+				sw, sh = gw, gh
+			}
+			if sfps <= 0 {
+				sfps = gf
+			}
+		}
+		if sw <= 0 || sh <= 0 {
+			sw, sh = 256, 192
+		}
+		if sfps <= 0 {
+			sfps = 15
+		}
+		ctrl.SetStreamConfig(sw, sh, sfps)
+
+		log.Printf("cast: starting stream to %s (%dx%d@%d)", cfg.ClientAddr, sw, sh, sfps)
 
 		// 2. Create UDP sender.
 		sender, err := transport.NewSender(cfg.ClientAddr, localAddr)
@@ -80,11 +103,7 @@ func Handler(ctrl *control.Handler, localAddr string) http.HandlerFunc {
 		defer cancel()
 
 		// 4. Start ffmpeg reading webm from stdin, outputting raw YUV.
-		csw, csh, cfps := ctrl.GetStreamConfig()
-		if csw <= 0 || csh <= 0 {
-			csw, csh, cfps = 256, 192, 15
-		}
-		scaleFilter := fmt.Sprintf("scale=%d:%d:flags=fast_bilinear,format=yuv420p", csw, csh)
+		scaleFilter := fmt.Sprintf("scale=%d:%d:flags=fast_bilinear,format=yuv420p", sw, sh)
 		cmd := exec.CommandContext(ctx, "ffmpeg",
 			"-hide_banner", "-loglevel", "warning",
 			"-fflags", "nobuffer",
@@ -96,7 +115,7 @@ func Handler(ctrl *control.Handler, localAddr string) http.HandlerFunc {
 			"-vf", scaleFilter,
 			"-f", "rawvideo",
 			"-pix_fmt", "yuv420p",
-			"-r", fmt.Sprintf("%d", cfps),
+			"-r", fmt.Sprintf("%d", sfps),
 			"pipe:1",
 		)
 		cmd.Stdin = pr
@@ -139,10 +158,6 @@ func Handler(ctrl *control.Handler, localAddr string) http.HandlerFunc {
 		}()
 
 		// 6. Read YUV frames from ffmpeg stdout and send via UDP.
-		sw, sh, _ := ctrl.GetStreamConfig()
-		if sw <= 0 || sh <= 0 {
-			sw, sh = 256, 192
-		}
 		frameBytes := sw * sh * 3 / 2
 		frame := make([]byte, frameBytes)
 
