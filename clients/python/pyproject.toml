@@ -1,10 +1,10 @@
 [project]
 name = "fake-3ds-client"
 version = "0.1.0"
-description = "Fake 3DS client that receives H.264 over UDP and displays video"
-readme = "README.md"
+description = "Fake 3DS client that receives LZ4-compressed YUV420p over UDP and displays video"
 requires-python = ">=3.10"
 dependencies = [
     "opencv-python>=4.8",
     "numpy>=1.24",
+    "lz4>=4.3",
 ]

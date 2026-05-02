@@ -7,12 +7,16 @@ import (
 	"net"
 	"sync/atomic"
 	"time"
+
+	lz4 "github.com/pierrec/lz4/v4"
 )
 
 type Sender struct {
 	conn *net.UDPConn
 	dest *net.UDPAddr
 	frameID atomic.Uint32
+	lz4c lz4.Compressor
+	lz4buf []byte
 }
 
 func NewSender(clientAddr, localAddr string) (*Sender, error){
@@ -48,8 +52,26 @@ func (s *Sender) nextFrameID() uint32 {
 
 
 func (s *Sender) SendFrame(data []byte, width, height uint16) error {
+	// LZ4-compress the raw YUV frame before chunking. The client derives
+	// the uncompressed size from width*height*3/2 in the header.
+	bound := lz4.CompressBlockBound(len(data))
+	if cap(s.lz4buf) < bound {
+		s.lz4buf = make([]byte, bound)
+	}
+	s.lz4buf = s.lz4buf[:bound]
+	n, err := s.lz4c.CompressBlock(data, s.lz4buf)
+	if err != nil {
+		return fmt.Errorf("lz4 compress: %w", err)
+	}
+	if n == 0 {
+		// Should be unreachable: dst is sized to CompressBlockBound, so
+		// the encoder always produces a valid block.
+		return fmt.Errorf("lz4 compress: produced empty block for %d-byte input", len(data))
+	}
+	payload := s.lz4buf[:n]
+
 	frameID := s.nextFrameID()
-	total := (len(data) + packet.MaxPayload - 1) / packet.MaxPayload
+	total := (len(payload) + packet.MaxPayload - 1) / packet.MaxPayload
 	if total == 0 {
 		total = 1
 	}
@@ -59,8 +81,8 @@ func (s *Sender) SendFrame(data []byte, width, height uint16) error {
 	for i := 0; i < total; i++ {
 		start := i * packet.MaxPayload
 		end := start + packet.MaxPayload
-		if end > len(data) {
-			end = len(data)
+		if end > len(payload) {
+			end = len(payload)
 		}
 
 		chunkLen := end - start
@@ -76,7 +98,7 @@ func (s *Sender) SendFrame(data []byte, width, height uint16) error {
 
 		hdr.Encode(buf[:16])
 
-		copy(buf[16:], data[start:end])
+		copy(buf[16:], payload[start:end])
 		datagram := buf[:16+chunkLen]
 
 		if _, err := s.conn.WriteToUDP(datagram, s.dest); err != nil {

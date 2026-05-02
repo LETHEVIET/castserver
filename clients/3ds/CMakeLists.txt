@@ -99,10 +99,19 @@ set(SOURCES
     ${PLATFORM_DIR}/gui.cpp
     ${PLATFORM_DIR}/logger.cpp
     ${PLATFORM_DIR}/3ds_asm.s
+    ${PLATFORM_DIR}/lz4.c
     ${PLATFORM_DIR}/net/udp_rx.cpp
     ${PLATFORM_DIR}/net/http_ctrl.cpp
     ${PLATFORM_DIR}/render/yuv_render.cpp
 )
+
+# lz4.c auto-selects LZ4_FORCE_MEMORY_ACCESS=2 (direct unaligned pointer
+# casts) on __ARM_ARCH_6K__. ARM11 supports unaligned LDR/STR but not
+# unaligned LDM/STM/LDRD/STRD, and GCC -O2 may combine the direct casts
+# into those wide instructions, faulting at runtime. Force method 0
+# (memcpy) which is portable and safe.
+set_source_files_properties(${PLATFORM_DIR}/lz4.c PROPERTIES
+    COMPILE_DEFINITIONS "LZ4_FORCE_MEMORY_ACCESS=0")
 
 # Compile any .v.pica shaders found alongside sources (none expected in v1,
 # but keep the hook so adding shaders later doesn't require CMake edits)

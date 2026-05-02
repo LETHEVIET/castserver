@@ -14,8 +14,13 @@
 #include "net/udp_rx.hpp"
 #include "net/http_ctrl.hpp"
 #include "yuv_render.hpp"
+#include "lz4.h"
 
 #define SOC_BUF_SIZE 0x100000
+
+// LZ4 decompression buffer — sized for largest YUV420p frame (320x240).
+#define DECOMP_BUF_SIZE (320 * 240 * 3 / 2)
+static uint8_t *s_decomp_buf = NULL;
 
 static void render_splash(C3D_RenderTarget *tgt, const char *msg, u32 color) {
     C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
@@ -78,11 +83,17 @@ int main(int argc, char **argv) {
         }
     }
 
-    // ---- YUV renderer (Y2R hw or CPU fallback) ----
-    render_splash(top, "Init: YUV renderer...", GUI_WHITE);
-    if (yuv_render_init() == 0) {
-        yuv_ok = true;
-    }
+	// ---- YUV renderer (Y2R hw or CPU fallback) ----
+	render_splash(top, "Init: YUV renderer...", GUI_WHITE);
+	if (yuv_render_init() == 0) {
+		yuv_ok = true;
+	}
+
+	// ---- LZ4 decompression buffer ----
+	s_decomp_buf = (uint8_t *)linearMemAlign(DECOMP_BUF_SIZE, 0x80);
+	if (!s_decomp_buf) {
+		Log("main: decomp buf alloc failed\n");
+	}
 
     // ---- IP detection ----
     if (net_ok) {
@@ -109,29 +120,32 @@ int main(int argc, char **argv) {
         if (kDown & KEY_X) gui_set_overlay_visible(!gui_overlay_visible());
         if (kDown & KEY_Y) gui_set_debug_visible(!gui_debug_visible());
 
-        // Drain all pending UDP datagrams — only the latest complete frame
-        // survives in the reassembly buffer, discarding stale frames.
-        bool got_frame = false;
-        if (udp_ok && yuv_ok && tex_ok) {
-            udp_rx_drain();
-            uint32_t frame_size = 0;
-            const uint8_t *frame_data = udp_rx_take_frame(&frame_size);
-            if (frame_data && frame_size > 0) {
-                uint16_t w = 0, h = 0;
-                udp_rx_get_dimensions(&w, &h);
-                if (w > 0 && h > 0) {
-                    uint32_t expected = (uint32_t)w * h * 3 / 2;
-                    if (frame_size == expected) {
-                        yuv_render_frame(&stream_img, frame_data, w, h);
-                        got_frame = true;
-                        decoded_count++;
-                    } else {
-                        Log("main: bad frame %u (expected %u for %ux%u)\n",
-                            frame_size, expected, w, h);
-                    }
-                }
-            }
-        }
+	// Drain all pending UDP datagrams — only the latest complete frame
+		// survives in the reassembly buffer, discarding stale frames.
+		bool got_frame = false;
+		if (udp_ok && yuv_ok && tex_ok) {
+			udp_rx_drain();
+			uint32_t frame_size = 0;
+			const uint8_t *frame_data = udp_rx_take_frame(&frame_size);
+			if (frame_data && frame_size > 0 && s_decomp_buf) {
+				uint16_t w = 0, h = 0;
+				udp_rx_get_dimensions(&w, &h);
+				if (w > 0 && h > 0) {
+					uint32_t expected = (uint32_t)w * h * 3 / 2;
+					int decompressed = LZ4_decompress_safe(
+						(const char *)frame_data, (char *)s_decomp_buf,
+						(int)frame_size, (int)expected);
+					if (decompressed == (int)expected) {
+						yuv_render_frame(&stream_img, s_decomp_buf, w, h);
+						got_frame = true;
+						decoded_count++;
+					} else {
+						Log("main: LZ4 decompress %d != %u\n",
+						    decompressed, expected);
+					}
+				}
+			}
+		}
         if (got_frame) displayed_count++;
 
         char status[64];
@@ -174,10 +188,11 @@ int main(int argc, char **argv) {
         C3D_FrameEnd(0);
     }
 
-    if (http_ok) http_ctrl_stop();
-    if (tex_ok)  Draw_c2d_image_free(stream_img);
-    if (yuv_ok)  yuv_render_deinit();
-    if (http_ok) http_ctrl_deinit();
+	if (http_ok) http_ctrl_stop();
+	if (tex_ok)  Draw_c2d_image_free(stream_img);
+	if (yuv_ok)  yuv_render_deinit();
+	if (s_decomp_buf) { linearFree(s_decomp_buf); s_decomp_buf = NULL; }
+	if (http_ok) http_ctrl_deinit();
     if (udp_ok)  udp_rx_deinit();
     if (net_ok)  socExit();
     free(soc_buf);
