@@ -3,6 +3,22 @@
 <head>
 <meta charset="UTF-8">
 <title>3DS Stream Server</title>
+<style>
+  body { font-family: sans-serif; max-width: 800px; margin: 20px auto; padding: 0 10px; }
+  h1 { border-bottom: 2px solid #333; padding-bottom: 10px; }
+  h2 { margin-top: 30px; }
+  code { background: #f4f4f4; padding: 2px 6px; border-radius: 3px; }
+  pre { background: #f4f4f4; padding: 10px; overflow-x: auto; }
+  input[type=text], select { font-family: monospace; font-size: 14px; }
+  .hint { color: #666; font-size: 0.9em; }
+  .err { color: #c00; }
+  .ok { color: #080; }
+  .info { color: #06c; }
+  .panel { background: #fafafa; border: 1px solid #ddd; padding: 15px; margin: 10px 0; border-radius: 4px; }
+  button { padding: 6px 14px; margin-right: 8px; cursor: pointer; }
+  .hidden { display: none; }
+  label { display: inline-block; min-width: 100px; font-weight: bold; }
+</style>
 </head>
 <body>
 
@@ -11,22 +27,102 @@
 <p id="serverStatus">Checking…</p>
 
 <h2>Control</h2>
-<form onsubmit="return false;">
+
+<div class="panel">
   <p>
-    Source:<br>
-    <input id="source" type="text" size="40" placeholder="e.g. /dev/video0">
+    <label>Source type:</label>
+    <select id="sourceType" onchange="onSourceTypeChange()">
+      <option value="youtube">YouTube</option>
+      <option value="file">Local file</option>
+      <option value="url">Raw URL</option>
+      <option value="default">Server default (-source flag)</option>
+    </select>
   </p>
+
+  <!-- YouTube -->
+  <div id="ytPanel">
+    <p>
+      <label>YouTube URL:</label>
+      <input id="ytUrl" type="text" size="50" placeholder="https://www.youtube.com/watch?v=...">
+    </p>
+    <p class="hint">The server extracts a 480p direct stream via yt-dlp for best 3DS compatibility.</p>
+  </div>
+
+  <!-- Local file -->
+  <div id="filePanel" class="hidden">
+    <p>
+      <label>File path:</label>
+      <input id="filePath" type="text" size="50" placeholder="/path/to/video.mp4">
+    </p>
+  </div>
+
+  <!-- Raw URL -->
+  <div id="urlPanel" class="hidden">
+    <p>
+      <label>Stream URL:</label>
+      <input id="rawUrl" type="text" size="50" placeholder="http://localhost:8080/stream">
+    </p>
+  </div>
+
+  <!-- Server default -->
+  <div id="defaultPanel" class="hidden">
+    <p class="info">Uses whatever the server was started with (e.g. <code>./streamserver -source ...</code>)</p>
+  </div>
+
   <p>
-    Client Address:<br>
-    <input id="clientAddr" type="text" size="40" placeholder="e.g. 192.168.1.42:1108">
+    <label>Resolution:</label>
+    <select id="resolution">
+      <option value="200x150">200×150 (33 chunks, lowest latency)</option>
+      <option value="256x192" selected>256×192 (54 chunks, balanced)</option>
+      <option value="320x240">320×240 (83 chunks, best quality)</option>
+    </select>
   </p>
+
   <p>
-    <button onclick="doPlay()">Play</button>
+    <label>FPS:</label>
+    <select id="fps">
+      <option value="10">10 fps (weakest WiFi)</option>
+      <option value="15" selected>15 fps (recommended)</option>
+      <option value="20">20 fps (strong WiFi only)</option>
+    </select>
+  </p>
+
+  <p>
+    <label>Client:</label>
+    <input id="clientAddr" type="text" size="30" placeholder="192.168.1.42:8001">
+    <span class="hint">3DS IP : UDP port</span>
+  </p>
+
+  <p>
+    <button id="playBtn" onclick="doPlay()">Play</button>
     <button onclick="doStop()">Stop</button>
     <button onclick="doKeyframe()">Keyframe</button>
   </p>
-</form>
-<p id="controlStatus"></p>
+  <p id="controlStatus"></p>
+</div>
+
+<h2>Browser Cast</h2>
+<p>Stream your screen or a browser tab directly — no ffmpeg or file paths needed.</p>
+<p><a href="/cast.html" style="font-size: 1.1em; font-weight: bold;">→ Open Cast Page</a></p>
+
+<h2>Quick Start</h2>
+
+<h3>1. Stream a video file</h3>
+<pre>./streamserver -source file:///path/to/video.mp4</pre>
+<p class="hint">Then on the 3DS just connect — it will use the server default.</p>
+
+<h3>2. Stream from mpv (with playback control)</h3>
+<pre>mkfifo /tmp/mpvstream
+mpv video.mp4 --o=/tmp/mpvstream --of=mpegts --ovc=libx264 --oac=aac &amp;
+./streamserver -source file:///tmp/mpvstream</pre>
+
+<h3>3. Stream your screen (Linux)</h3>
+<pre>ffmpeg -f x11grab -i :0.0 -vf "scale=256:192" -c:v libx264 -f mpegts /tmp/screen.ts &amp;
+./streamserver -source file:///tmp/screen.ts</pre>
+
+<h3>4. Stream from VLC</h3>
+<pre># In VLC: Media → Stream → HTTP, port 8080, path /stream
+./streamserver -source http://localhost:8080/stream</pre>
 
 <h2>Stats</h2>
 <p>
@@ -66,18 +162,89 @@ function checkServer() {
 }
 
 function setCtrl(msg, isErr) {
-  document.getElementById('controlStatus').textContent = msg;
+  var el = document.getElementById('controlStatus');
+  el.textContent = msg;
+  el.className = isErr ? 'err' : 'ok';
+}
+
+function onSourceTypeChange() {
+  var type = document.getElementById('sourceType').value;
+  document.getElementById('ytPanel').className    = type === 'youtube' ? '' : 'hidden';
+  document.getElementById('filePanel').className  = type === 'file'    ? '' : 'hidden';
+  document.getElementById('urlPanel').className   = type === 'url'     ? '' : 'hidden';
+  document.getElementById('defaultPanel').className = type === 'default' ? '' : 'hidden';
+}
+
+function getSource() {
+  var type = document.getElementById('sourceType').value;
+  if (type === 'youtube') return document.getElementById('ytUrl').value.trim();
+  if (type === 'file')    return 'file://' + document.getElementById('filePath').value.trim();
+  if (type === 'url')     return document.getElementById('rawUrl').value.trim();
+  if (type === 'default') return '';
+  return '';
 }
 
 function doPlay() {
-  var source = document.getElementById('source').value.trim();
   var clientAddr = document.getElementById('clientAddr').value.trim();
-  if (!source || !clientAddr) {
-    setCtrl('Source and Client Address are required.', true);
+  if (!clientAddr) {
+    setCtrl('Client Address is required.', true);
     return;
   }
-  setCtrl('Starting…', false);
-  api('POST', '/play', { source: source, client_addr: clientAddr }).then(function(res) {
+
+  var type = document.getElementById('sourceType').value;
+  var source = getSource();
+
+  if (type === 'youtube') {
+    if (!source) {
+      setCtrl('YouTube URL is required.', true);
+      return;
+    }
+    setCtrl('Extracting direct stream URL…', false);
+    api('POST', '/extract', { url: source }).then(function(res) {
+      if (!res.ok) {
+        setCtrl('Extraction failed: ' + JSON.stringify(res.data), true);
+        return;
+      }
+      var direct = res.data.direct_url;
+      var resVal = document.getElementById('resolution').value.split('x');
+      var width  = parseInt(resVal[0], 10);
+      var height = parseInt(resVal[1], 10);
+      var fps    = parseInt(document.getElementById('fps').value, 10);
+
+      setCtrl('Got direct URL, starting stream…', false);
+      api('POST', '/play', {
+        source: direct,
+        client_addr: clientAddr,
+        width: width,
+        height: height,
+        fps: fps
+      }).then(function(res2) {
+        setCtrl(res2.ok ? 'Playing' : 'Error ' + res2.status + ': ' + JSON.stringify(res2.data), !res2.ok);
+        if (res2.ok) loadStats();
+      });
+    });
+    return;
+  }
+
+  // Non-YouTube sources go straight to /play
+  if (type !== 'default' && !source) {
+    setCtrl('Source is required.', true);
+    return;
+  }
+
+  var resVal = document.getElementById('resolution').value.split('x');
+  var width  = parseInt(resVal[0], 10);
+  var height = parseInt(resVal[1], 10);
+  var fps    = parseInt(document.getElementById('fps').value, 10);
+
+  setCtrl('Starting ' + width + 'x' + height + '@' + fps + '…', false);
+  api('POST', '/play', {
+    source: source,
+    client_addr: clientAddr,
+    width: width,
+    height: height,
+    fps: fps
+  }).then(function(res) {
     setCtrl(res.ok ? 'Playing' : 'Error ' + res.status + ': ' + JSON.stringify(res.data), !res.ok);
     if (res.ok) loadStats();
   });

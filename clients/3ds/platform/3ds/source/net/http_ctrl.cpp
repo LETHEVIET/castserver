@@ -68,9 +68,16 @@ static int post_json(const char *path, const char *json_body) {
 
 int http_ctrl_play(const char *source_url, const char *my_ip, int my_udp_port) {
     char body[512];
-    snprintf(body, sizeof(body),
-             "{\"source\":\"%s\",\"client_addr\":\"%s:%d\"}",
-             source_url, my_ip, my_udp_port);
+    if (source_url && source_url[0] != '\0') {
+        snprintf(body, sizeof(body),
+                 "{\"source\":\"%s\",\"client_addr\":\"%s:%d\"}",
+                 source_url, my_ip, my_udp_port);
+    } else {
+        // Empty source — let the server use its default (-source flag).
+        snprintf(body, sizeof(body),
+                 "{\"source\":\"\",\"client_addr\":\"%s:%d\"}",
+                 my_ip, my_udp_port);
+    }
     return post_json("/play", body);
 }
 

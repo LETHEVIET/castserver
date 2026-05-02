@@ -4,18 +4,15 @@
 #define TOP_SCREEN_WIDTH   400
 #define TOP_SCREEN_HEIGHT  240
 
-// Stream dimensions — smaller to save bandwidth on Old 3DS WiFi.
-// 256x192 = 1.5:1 aspect (close to 3DS top screen 5:3 = 1.67:1).
-// YUV420p = 256*192*3/2 = 73728 bytes/frame (~54 chunks @ 1400 B payload).
+// Texture atlas — must be power-of-2, large enough for all presets.
+// 512x256 fits 320x240 (largest preset).
+#define TEX_WIDTH   512
+#define TEX_HEIGHT  256
+
+// Default stream dimensions (used before first UDP packet arrives).
+// The actual dimensions are read from the UDP header and may be smaller.
 #define STREAM_WIDTH   256
 #define STREAM_HEIGHT  192
-
-// YUV420p frame size at STREAM_WIDTH x STREAM_HEIGHT
-#define YUV_FRAME_SIZE (STREAM_WIDTH * STREAM_HEIGHT * 3 / 2)
-
-// Texture atlas — next power-of-2 >= stream dimensions
-#define TEX_WIDTH   256
-#define TEX_HEIGHT  256
 
 // Logging
 #define MAX_LOG_LINES 32
@@ -32,8 +29,9 @@
 #endif
 
 // Stream source URL — override at compile time: -DSOURCE_URL='"rtsp://..."'
+// Leave empty ("") to use the server's default source (-source flag).
 #ifndef SOURCE_URL
-#define SOURCE_URL "rtsp://192.168.1.100:8554/test"
+#define SOURCE_URL ""
 #endif
 
 // This device's IP (reported to server so it knows where to send UDP)

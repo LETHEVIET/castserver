@@ -1,4 +1,5 @@
 #include "gui.h"
+#include "logger.h"
 #include <string.h>
 #include <stdio.h>
 
@@ -63,7 +64,7 @@ void gui_update_frame(bool connected, const char *ip, int port) {
 
     // ---- Stream info ----
     snprintf(s_state.stream_info, sizeof(s_state.stream_info),
-             "256x192  |  %d FPS", s_state.fps);
+             "256x192  |  %d/%d FPS", s_state.fps, 15);
 
     // ---- Debug line ----
     snprintf(s_state.debug_line, sizeof(s_state.debug_line),
@@ -194,6 +195,36 @@ void gui_set_frame_stats(uint32_t nal_frames, uint32_t decoded_frames, uint32_t 
     s_state.decoded_frames   = decoded_frames;
     s_state.displayed_frames = displayed_frames;
     s_state.dropped_frames   = dropped_frames;
+}
+
+// Draw the last N log lines on the bottom screen (320x240).
+void gui_draw_logs(void) {
+    if (!s_text_buf) return;
+
+    const auto &logs = GetLogs();
+    if (logs.empty()) return;
+
+    // Dark background
+    gui_draw_rect(0.0f, 0.0f, 320.0f, 240.0f, GUI_BLACK);
+
+    // Title bar
+    gui_draw_rect(0.0f, 0.0f, 320.0f, 14.0f, GUI_DARK_GRAY);
+    gui_draw_text("Logs", 4.0f, 1.0f, 0.4f, GUI_WHITE);
+
+    // Draw from bottom up, newest at bottom
+    float line_h = 11.0f;
+    float y = 240.0f - 2.0f;
+    float scale = 0.32f;
+    int max_lines = 20;
+
+    int start = (int)logs.size() - max_lines;
+    if (start < 0) start = 0;
+
+    for (int i = (int)logs.size() - 1; i >= start; i--) {
+        y -= line_h;
+        if (y < 16.0f) break;
+        gui_draw_text(logs[i].c_str(), 4.0f, y, scale, GUI_LIGHT_GRAY);
+    }
 }
 
 void gui_draw_big_status(const char *line1, const char *line2, u32 color) {

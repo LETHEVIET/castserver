@@ -80,6 +80,9 @@ void gui_draw_rect(float x, float y, float w, float h, u32 color);
 // Draw a large centered status message (for showing IP / connection info)
 void gui_draw_big_status(const char *line1, const char *line2, u32 color);
 
+// Draw the latest log lines on the bottom screen.
+void gui_draw_logs(void);
+
 // Update UDP diagnostic counters shown in debug panel
 void gui_set_udp_stats(uint32_t calls, uint32_t bytes, uint32_t packets, uint32_t errors);
 

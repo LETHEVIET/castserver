@@ -6,12 +6,13 @@ import (
 	"io"
 	"log"
 	"os/exec"
+	"strconv"
 )
 
-// FrameBytes is the size of one 256×192 YUV420p frame.
-const FrameBytes = 256 * 192 * 3 / 2 // 73728
+func Run(ctx context.Context, sourceURL string, width, height, fps int, out chan<- []byte) error {
+	frameBytes := width * height * 3 / 2
+	scaleFilter := fmt.Sprintf("scale=%d:%d:flags=fast_bilinear,format=yuv420p", width, height)
 
-func Run(ctx context.Context, sourceURL string, out chan<- []byte) error {
 	probeArgs := []string{"-fflags", "nobuffer", "-flags", "low_delay",
 		"-probesize", "32", "-analyzeduration", "0"}
 	if len(sourceURL) >= 7 && sourceURL[:7] == "file://" {
@@ -23,9 +24,9 @@ func Run(ctx context.Context, sourceURL string, out chan<- []byte) error {
 	args = append(args,
 		"-i", sourceURL,
 		"-an", "-sn", "-dn",
-		"-vf", "scale=256:192:flags=fast_bilinear,format=yuv420p",
+		"-vf", scaleFilter,
 		"-f", "rawvideo", "-pix_fmt", "yuv420p",
-		"-r", "20",
+		"-r", strconv.Itoa(fps),
 		"pipe:1",
 	)
 
@@ -58,9 +59,9 @@ func Run(ctx context.Context, sourceURL string, out chan<- []byte) error {
 		}
 	}()
 
-	log.Printf("Started ffmpeg with PID %d for source %s", cmd.Process.Pid, sourceURL)
+	log.Printf("Started ffmpeg with PID %d for source %s (%dx%d@%d)", cmd.Process.Pid, sourceURL, width, height, fps)
 
-	if err := readFrames(stdout, out); err != nil {
+	if err := readFrames(stdout, out, frameBytes); err != nil {
 		return fmt.Errorf("read frames: %w", err)
 	}
 
@@ -71,8 +72,8 @@ func Run(ctx context.Context, sourceURL string, out chan<- []byte) error {
 	return nil
 }
 
-func readFrames(r io.Reader, out chan<- []byte) error {
-	frame := make([]byte, FrameBytes)
+func readFrames(r io.Reader, out chan<- []byte, frameBytes int) error {
+	frame := make([]byte, frameBytes)
 	for {
 		n, err := io.ReadFull(r, frame)
 		if err == io.EOF {
@@ -85,12 +86,12 @@ func readFrames(r io.Reader, out chan<- []byte) error {
 		if err != nil {
 			return err
 		}
-		if n != FrameBytes {
-			return fmt.Errorf("short read: %d < %d", n, FrameBytes)
+		if n != frameBytes {
+			return fmt.Errorf("short read: %d < %d", n, frameBytes)
 		}
 
 		// copy because the channel consumer may hold onto it
-		frameCopy := make([]byte, FrameBytes)
+		frameCopy := make([]byte, frameBytes)
 		copy(frameCopy, frame)
 		out <- frameCopy
 	}

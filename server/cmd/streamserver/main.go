@@ -12,6 +12,7 @@ import (
     "sync"
     "time"
 
+    "3dsstreaming/internal/cast"
     "3dsstreaming/internal/control"
     "3dsstreaming/internal/ingest"
     "3dsstreaming/internal/transport"
@@ -24,6 +25,7 @@ func main() {
     var (
         listenAddr = flag.String("listen", ":1108", "HTTP REST listen address")
         udpAddr    = flag.String("udp", ":1108", "UDP sender bind address")
+        sourceURL  = flag.String("source", "", "Default ingest source URL (ffmpeg -i compatible). When set, 3DS /play can omit the source field.")
     )
 
     flag.Parse()
@@ -33,6 +35,10 @@ func main() {
     log.Printf("  UDP sender: %s", *udpAddr)
 
     ctrl := &control.Handler{}
+    if *sourceURL != "" {
+        ctrl.SetSourceURL(*sourceURL)
+        log.Printf("  Default source: %s", *sourceURL)
+    }
 
     // Mutable state for the currently running ingest.
     // Protected by mu because net/http runs each request in its own goroutine.
@@ -57,6 +63,9 @@ func main() {
         }
         http.ServeFileFS(w, r, staticFS, "static/index.html")
     })
+    mux.HandleFunc("/cast.html", func(w http.ResponseWriter, r *http.Request) {
+        http.ServeFileFS(w, r, staticFS, "static/cast.html")
+    })
 
     mux.HandleFunc("/play", func(w http.ResponseWriter, r *http.Request) {
         if r.Method != http.MethodPost {
@@ -78,16 +87,31 @@ func main() {
             return
         }
 
-        if req.Source == "" {
-            mu.Unlock()
-            http.Error(w, "source is required", http.StatusBadRequest)
-            return
+        // If the request doesn't specify a source, fall back to the server's default.
+        source := req.Source
+        if source == "" {
+            source = ctrl.GetSourceURL()
+            if source == "" {
+                mu.Unlock()
+                http.Error(w, "source is required (no server default configured)", http.StatusBadRequest)
+                return
+            }
         }
         if req.ClientAddr == "" {
             mu.Unlock()
             http.Error(w, "client_addr is required", http.StatusBadRequest)
             return
         }
+
+        // Apply defaults for resolution / fps.
+        sw, sh, sfps := req.Width, req.Height, req.FPS
+        if sw <= 0 || sh <= 0 {
+            sw, sh = 256, 192
+        }
+        if sfps <= 0 {
+            sfps = 15
+        }
+        ctrl.SetStreamConfig(sw, sh, sfps)
 
         // Create the UDP sender
         sender, err := transport.NewSender(req.ClientAddr, *udpAddr)
@@ -108,7 +132,7 @@ func main() {
         // Start ingest goroutine
         go func() {
             defer close(nalCh)
-            if err := ingest.Run(ctx, req.Source, nalCh); err != nil {
+            if err := ingest.Run(ctx, source, sw, sh, sfps, nalCh); err != nil {
                 log.Printf("ingest: %v", err)
             }
             log.Printf("ingest: pipeline ended")
@@ -126,7 +150,7 @@ func main() {
                 log.Printf("sender: stopped")
             }()
             for frame := range nalCh {
-                if err := sender.SendFrame(frame); err != nil {
+                if err := sender.SendFrame(frame, uint16(sw), uint16(sh)); err != nil {
                     log.Printf("send: %v", err)
                     cancel() // stop ingest on send failure
                     break
@@ -140,7 +164,7 @@ func main() {
         ctrl.SetClientAddr(req.ClientAddr)
         mu.Unlock()
 
-        log.Printf("control: streaming started — source=%s client=%s", req.Source, req.ClientAddr)
+        log.Printf("control: streaming started — source=%s client=%s %dx%d@%d", source, req.ClientAddr, sw, sh, sfps)
 
         w.Header().Set("Content-Type", "application/json")
         json.NewEncoder(w).Encode(control.PlayResponse{Status: "playing"})
@@ -173,6 +197,8 @@ func main() {
     })
 
     mux.HandleFunc("/stats", ctrl.HandleStats)
+    mux.HandleFunc("/extract", ctrl.HandleExtract)
+    mux.HandleFunc("/ws/cast", cast.Handler(ctrl, *udpAddr))
 
     mux.HandleFunc("/keyframe", func(w http.ResponseWriter, r *http.Request) {
         if r.Method != http.MethodPost {

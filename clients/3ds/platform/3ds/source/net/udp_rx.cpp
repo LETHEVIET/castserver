@@ -37,6 +37,10 @@ static uint8_t  s_complete_buf[NAL_REASSEMBLY_BUF_SIZE];
 static uint32_t s_complete_size  = 0;
 static bool     s_complete_ready = false;
 
+// Stream dimensions (read from UDP headers)
+static uint16_t s_stream_width  = 0;
+static uint16_t s_stream_height = 0;
+
 static void reset_frame(void) {
     s_frame.active = false;
     s_frame.got    = 0;
@@ -50,7 +54,7 @@ int udp_rx_init(int port) {
         return -1;
     }
 
-    // Increase receive buffer to handle large YUV frames (144KB split into ~103 chunks)
+    // Increase receive buffer to handle large YUV frames
     int rcvbuf = 256 * 1024;  // 256 KB
     setsockopt(s_sock, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
 
@@ -69,13 +73,14 @@ int udp_rx_init(int port) {
         return -1;
     }
 
-    // Verify the buffer was actually set
     int actual = 0;
     socklen_t len = sizeof(actual);
     getsockopt(s_sock, SOL_SOCKET, SO_RCVBUF, &actual, &len);
     Log("udp_rx: listening on :%d  rcvbuf=%d\n", port, actual);
 
     reset_frame();
+    s_stream_width  = 0;
+    s_stream_height = 0;
     return 0;
 }
 
@@ -109,12 +114,23 @@ int udp_rx_drain(void) {
                                 ((uint32_t)dgram[6]<< 8)| (uint32_t)dgram[7];
         uint16_t chunk_id     = ((uint16_t)dgram[8]<<8)  | dgram[9];
         uint16_t total_chunks = ((uint16_t)dgram[10]<<8) | dgram[11];
+        uint16_t width        = ((uint16_t)dgram[12]<<8) | dgram[13];
+        uint16_t height       = ((uint16_t)dgram[14]<<8) | dgram[15];
         uint16_t payload_len  = (uint16_t)(n - UDP_HDR_SIZE);
 
         if (magic != UDP_MAGIC)               continue;
         if (total_chunks == 0)                continue;
         if (chunk_id >= total_chunks)         continue;
         if (total_chunks > NAL_CHUNK_MAX)     continue;
+
+        // Update stream dimensions from first chunk of each frame
+        if (chunk_id == 0 && width > 0 && height > 0) {
+            if (s_stream_width != width || s_stream_height != height) {
+                s_stream_width  = width;
+                s_stream_height = height;
+                Log("udp_rx: stream dimensions %ux%u\n", width, height);
+            }
+        }
 
         // New frame_id → if old one was in progress, count it as dropped
         if (s_frame.active && frame_id != s_frame.frame_id) {
@@ -169,6 +185,11 @@ const uint8_t *udp_rx_take_frame(uint32_t *out_size) {
     s_complete_ready = false;
     *out_size = s_complete_size;
     return s_complete_buf;
+}
+
+void udp_rx_get_dimensions(uint16_t *out_width, uint16_t *out_height) {
+    *out_width  = s_stream_width;
+    *out_height = s_stream_height;
 }
 
 uint32_t udp_rx_recv_calls(void)   { return s_recv_calls; }

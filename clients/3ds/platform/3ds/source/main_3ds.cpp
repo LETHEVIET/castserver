@@ -32,6 +32,7 @@ int main(int argc, char **argv) {
     C2D_Prepare();
 
     C3D_RenderTarget *top = C2D_CreateScreenTarget(GFX_TOP, GFX_LEFT);
+    C3D_RenderTarget *bot = C2D_CreateScreenTarget(GFX_BOTTOM, GFX_LEFT);
 
     if (!gui_init()) {
         render_splash(top, "GUI init failed", GUI_RED);
@@ -61,7 +62,7 @@ int main(int argc, char **argv) {
         if (http_ctrl_init(SERVER_HOST, SERVER_HTTP_PORT) >= 0) http_ok = true;
     }
 
-    // ---- Texture (sized to stream resolution, not screen) ----
+    // ---- Texture (512x256 atlas, big enough for all presets) ----
     render_splash(top, "Init: texture...", GUI_WHITE);
     {
         Result_with_string r = Draw_c2d_image_init(&stream_img, TEX_WIDTH, TEX_HEIGHT, GPU_RGB565);
@@ -115,12 +116,20 @@ int main(int argc, char **argv) {
             udp_rx_drain();
             uint32_t frame_size = 0;
             const uint8_t *frame_data = udp_rx_take_frame(&frame_size);
-            if (frame_data && frame_size == YUV_FRAME_SIZE) {
-                yuv_render_frame(&stream_img, frame_data);
-                got_frame = true;
-                decoded_count++;
-            } else if (frame_data && frame_size != 0) {
-                Log("main: bad frame %u (expected %d)\n", frame_size, YUV_FRAME_SIZE);
+            if (frame_data && frame_size > 0) {
+                uint16_t w = 0, h = 0;
+                udp_rx_get_dimensions(&w, &h);
+                if (w > 0 && h > 0) {
+                    uint32_t expected = (uint32_t)w * h * 3 / 2;
+                    if (frame_size == expected) {
+                        yuv_render_frame(&stream_img, frame_data, w, h);
+                        got_frame = true;
+                        decoded_count++;
+                    } else {
+                        Log("main: bad frame %u (expected %u for %ux%u)\n",
+                            frame_size, expected, w, h);
+                    }
+                }
             }
         }
         if (got_frame) displayed_count++;
@@ -136,6 +145,7 @@ int main(int argc, char **argv) {
                           udp_rx_recv_packets(), udp_rx_recv_errors());
         gui_set_frame_stats(udp_rx_nal_frames(), decoded_count, displayed_count, udp_rx_dropped_frames());
 
+        // ---- Top screen (video) ----
         C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
         C2D_TargetClear(top, C2D_Color32(0, 0, 0, 255));
         C2D_SceneBegin(top);
@@ -155,6 +165,11 @@ int main(int argc, char **argv) {
             snprintf(l2, sizeof(l2), "Server -> %s:%d", my_ip, UDP_RECV_PORT);
             gui_draw_big_status(l1, l2, GUI_WHITE);
         }
+
+        // ---- Bottom screen (logs) ----
+        C2D_TargetClear(bot, C2D_Color32(0, 0, 0, 255));
+        C2D_SceneBegin(bot);
+        gui_draw_logs();
 
         C3D_FrameEnd(0);
     }
