@@ -64,7 +64,7 @@ func Handler(ctrl *control.Handler) http.HandlerFunc {
 		writeDeadline := 2 * time.Second
 
 		if latency <= 0 {
-			// No artificial delay: write directly with timestamp prepended
+			// No artificial delay: write directly
 			for {
 				select {
 				case <-done:
@@ -75,20 +75,20 @@ func Handler(ctrl *control.Handler) http.HandlerFunc {
 					if !ok {
 						return
 					}
-					// Prepend server timestamp (64-bit int64 millisecond epoch)
 					preWrite := time.Now()
-					ts := preWrite.UnixMilli()
-					payload := make([]byte, 8+len(frame))
-					binary.BigEndian.PutUint64(payload[:8], uint64(ts))
-					copy(payload[8:], frame)
+					if ctrl.Latency().IsEnabled() && len(frame) >= 24 {
+						binary.BigEndian.PutUint64(frame[16:24], uint64(preWrite.UnixMilli()))
+					}
 
 					_ = ws.SetWriteDeadline(time.Now().Add(writeDeadline))
-					if err := ws.WriteMessage(websocket.BinaryMessage, payload); err != nil {
+					if err := ws.WriteMessage(websocket.BinaryMessage, frame); err != nil {
 						log.Printf("web: write failed (subscriber dropping): %v", err)
 						return
 					}
-					if d := time.Since(preWrite); d > 5*time.Millisecond {
-						log.Printf("web: slow delivery: %v (%d bytes)", d, len(payload))
+					dur := time.Since(preWrite)
+					ctrl.Latency().RecordDelivery(dur)
+					if dur > 5*time.Millisecond {
+						log.Printf("web: slow delivery: %v (%d bytes)", dur, len(frame))
 					}
 				}
 			}
@@ -116,14 +116,9 @@ func Handler(ctrl *control.Handler) http.HandlerFunc {
 					if !ok {
 						return
 					}
-					ts := time.Now().UnixMilli()
-					payload := make([]byte, 8+len(frame))
-					binary.BigEndian.PutUint64(payload[:8], uint64(ts))
-					copy(payload[8:], frame)
-
 					queueMu.Lock()
 					queue = append(queue, delayedFrame{
-						payload:  payload,
+						payload:  frame,
 						sendTime: time.Now().Add(latency),
 					})
 					queueMu.Unlock()
@@ -158,11 +153,16 @@ func Handler(ctrl *control.Handler) http.HandlerFunc {
 			queueMu.Unlock()
 
 			if hasFrame {
+				preWrite := time.Now()
+				if ctrl.Latency().IsEnabled() && len(nextPayload) >= 24 {
+					binary.BigEndian.PutUint64(nextPayload[16:24], uint64(preWrite.UnixMilli()))
+				}
 				_ = ws.SetWriteDeadline(time.Now().Add(writeDeadline))
 				if err := ws.WriteMessage(websocket.BinaryMessage, nextPayload); err != nil {
 					log.Printf("web: delayed write failed: %v", err)
 					return
 				}
+				ctrl.Latency().RecordDelivery(time.Since(preWrite))
 				continue
 			}
 

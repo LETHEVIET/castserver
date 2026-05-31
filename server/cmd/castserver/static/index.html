@@ -437,7 +437,13 @@
       </div>
 
       <div class="card">
-        <h2>Pipeline Latency</h2>
+        <div style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid var(--border); padding-bottom:8px; margin-bottom:20px;">
+          <h2 style="margin:0; border:none; padding:0;">Pipeline Latency</h2>
+          <label style="width:auto; font-size:11px; display:flex; align-items:center; gap:6px; cursor:pointer; color:var(--text-muted);">
+            <input id="telemetryToggle" type="checkbox" checked onchange="toggleTelemetry()" style="transform:scale(1.1); margin:0;">
+            Enable Tracing
+          </label>
+        </div>
         <table>
           <thead>
             <tr>
@@ -461,6 +467,11 @@
               <td>JPEG Pump</td>
               <td id="ltPump" class="val">—</td>
               <td><div class="lat-bar"><div id="ltPumpBar" class="lat-fill"></div></div></td>
+            </tr>
+            <tr>
+              <td>WS Delivery</td>
+              <td id="ltDelivery" class="val">—</td>
+              <td><div class="lat-bar"><div id="ltDeliveryBar" class="lat-fill"></div></div></td>
             </tr>
             <tr style="border-top: 1px solid var(--border);">
               <td><strong>Total Server</strong></td>
@@ -489,7 +500,7 @@ function loadPresets() {
       var opt = document.createElement('option');
       opt.value = p.name;
       opt.textContent = p.name;
-      if (p.name === 'Native (No Scaling)') opt.selected = true;
+      if (p.name === 'NVIDIA Native (GPU)') opt.selected = true;
       sel.appendChild(opt);
     });
     onPresetChange();
@@ -552,9 +563,10 @@ function setButtons(active) {
 
 // ---------- Cast ----------
 var castWs = null, castRecorder = null, castStream = null;
+var sendChain = Promise.resolve();
 
 function getCastMimeType() {
-  var types = ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm'];
+  var types = ['video/webm;codecs=h264', 'video/webm;codecs=vp8', 'video/webm;codecs=vp9', 'video/webm'];
   for (var i = 0; i < types.length; i++) {
     if (window.MediaRecorder && MediaRecorder.isTypeSupported(types[i])) return types[i];
   }
@@ -578,6 +590,7 @@ function castCleanup() {
   prev.style.display = 'none';
   prev.srcObject = null;
   setButtons(false);
+  sendChain = Promise.resolve(); // Reset chain
 }
 
 function doStop() {
@@ -613,7 +626,11 @@ function doStart() {
 
   setCtrl('Requesting screen capture...', false);
   navigator.mediaDevices.getDisplayMedia({
-    video: { frameRate: { ideal: fps } },
+    video: {
+      frameRate: { ideal: fps },
+      latency: 0,
+      resizeMode: 'none'
+    },
     audio: false,
   }).then(function(s) {
     castStream = s;
@@ -640,9 +657,25 @@ function doStart() {
         mimeType: mimeType,
         videoBitsPerSecond: bitrateBps,
       });
+      
+      sendChain = Promise.resolve();
       castRecorder.ondataavailable = function(e) {
         if (e.data.size > 0 && castWs && castWs.readyState === WebSocket.OPEN) {
-          e.data.arrayBuffer().then(function(buf) { castWs.send(buf); });
+          var blob = e.data;
+          var ts = Date.now();
+          sendChain = sendChain.then(function() {
+            return blob.arrayBuffer().then(function(buf) {
+              if (!castWs || castWs.readyState !== WebSocket.OPEN) return;
+              var payload = new Uint8Array(8 + buf.byteLength);
+              var view = new DataView(payload.buffer);
+              var hi = Math.floor(ts / 0x100000000);
+              var lo = ts % 0x100000000;
+              view.setUint32(0, hi);
+              view.setUint32(4, lo);
+              payload.set(new Uint8Array(buf), 8);
+              castWs.send(payload.buffer);
+            });
+          });
         }
       };
       castRecorder.onerror = function(e) {
@@ -812,19 +845,48 @@ function makeQR(text) {
   return canvas;
 }
 
+function toggleTelemetry() {
+  var active = document.getElementById('telemetryToggle').checked;
+  fetch('/stats/telemetry/toggle', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ enabled: active })
+  }).then(function(r) { return r.json(); }).then(function(res) {
+    loadLatency();
+  });
+}
+
 function loadLatency() {
   fetch('/stats/latency').then(function(r) { return r.json(); }).then(function(s) {
-    var maxUs = Math.max(s.avg_pipe_write_us, s.avg_transcode_us, s.avg_pump_us, 1);
+    document.getElementById('telemetryToggle').checked = !!s.enabled;
+
+    if (!s.enabled) {
+      document.getElementById('ltPipe').textContent = 'disabled';
+      document.getElementById('ltTranscode').textContent = 'disabled';
+      document.getElementById('ltPump').textContent = 'disabled';
+      document.getElementById('ltDelivery').textContent = 'disabled';
+      document.getElementById('ltTotal').textContent = 'disabled';
+      document.getElementById('ltFrameSeq').textContent = '—';
+      document.getElementById('ltPipeBar').style.width = '0%';
+      document.getElementById('ltTranscodeBar').style.width = '0%';
+      document.getElementById('ltPumpBar').style.width = '0%';
+      document.getElementById('ltDeliveryBar').style.width = '0%';
+      return;
+    }
+
+    var maxUs = Math.max(s.avg_pipe_write_us, s.avg_transcode_us, s.avg_pump_us, s.avg_delivery_us, 1);
 
     document.getElementById('ltPipe').textContent = s.avg_pipe_write_us;
     document.getElementById('ltTranscode').textContent = s.avg_transcode_us;
     document.getElementById('ltPump').textContent = s.avg_pump_us;
+    document.getElementById('ltDelivery').textContent = s.avg_delivery_us;
     document.getElementById('ltTotal').textContent = s.avg_total_us;
     document.getElementById('ltFrameSeq').textContent = s.frame_seq;
 
     document.getElementById('ltPipeBar').style.width = (s.avg_pipe_write_us / maxUs * 100) + '%';
     document.getElementById('ltTranscodeBar').style.width = (s.avg_transcode_us / maxUs * 100) + '%';
     document.getElementById('ltPumpBar').style.width = (s.avg_pump_us / maxUs * 100) + '%';
+    document.getElementById('ltDeliveryBar').style.width = (s.avg_delivery_us / maxUs * 100) + '%';
   }).catch(function() {});
 }
 

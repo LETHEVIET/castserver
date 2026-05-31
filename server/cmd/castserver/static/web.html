@@ -42,7 +42,6 @@
     max-width: 100%;
     max-height: 100%;
     display: none;
-    object-fit: contain;
   }
 
   /* Sleek top-right stats pill */
@@ -229,7 +228,7 @@
 <body>
 
 <div id="wrap">
-  <img id="view" alt="Cast Screen">
+  <canvas id="view"></canvas>
   
   <div id="idleScreen">
     <div class="pulse-wave">
@@ -271,8 +270,11 @@
   var statsT = 0;
   var overlayTimeout = null;
   var lastDecodeMs = null;
+  var frameSequence = 0;
+  var maxRenderedSeq = 0;
 
   var view = document.getElementById('view');
+  var ctx = view.getContext('2d');
   var idleScreen = document.getElementById('idleScreen');
   var statsPill = document.getElementById('statsPill');
   var metrics = document.getElementById('metrics');
@@ -332,6 +334,7 @@
     ws.onopen = function () {
       document.getElementById('idleText').innerHTML = 'Connected. Waiting for stream...';
       frameCount = 0; byteCount = 0; statsT = Date.now();
+      frameSequence = 0; maxRenderedSeq = 0;
       statsPill.classList.remove('hidden');
       metrics.textContent = 'Connected';
     };
@@ -359,55 +362,140 @@
       }
       
       var arrayBuffer = ev.data;
-      if (arrayBuffer.byteLength < 8) return;
+      if (arrayBuffer.byteLength < 24) return;
+      
+      frameSequence++;
+      var currentSeq = frameSequence;
       
       var recvTime = performance.now();
+      var nowMs = Date.now();
       
-      // Parse 8-byte big-endian server timestamp (ms epoch) without BigInt
+      // Parse 24-byte big-endian telemetry header
       var view8 = new DataView(arrayBuffer);
-      var tsHi = view8.getUint32(0);
-      var tsLo = view8.getUint32(4);
-      var timestamp = tsHi * 0x100000000 + tsLo;
       
-      // Extract original JPEG bytes
-      var jpegBytes = new Uint8Array(arrayBuffer, 8);
+      var sHi = view8.getUint32(0);
+      var sLo = view8.getUint32(4);
+      var senderAt = sHi * 0x100000000 + sLo;
+      
+      var iHi = view8.getUint32(8);
+      var iLo = view8.getUint32(12);
+      var ingestAt = iHi * 0x100000000 + iLo;
+      
+      var pHi = view8.getUint32(16);
+      var pLo = view8.getUint32(20);
+      var publishAt = pHi * 0x100000000 + pLo;
+      
+      // Extract original JPEG bytes (isolating buffer to bypass browser byteOffset bug)
+      var jpegBytes = new Uint8Array(arrayBuffer.slice(24));
       var jpegBlob = new Blob([jpegBytes], {type: 'image/jpeg'});
       
       byteCount += jpegBlob.size;
       frameCount++;
       
-      var newUrl = URL.createObjectURL(jpegBlob);
-      idleScreen.style.display = 'none';
-      view.style.display = 'block';
-      
-      // Measure decode+render time via onload
       var frameRecv = recvTime;
-      view.onload = function() {
-        var renderDone = performance.now();
-        lastDecodeMs = (renderDone - frameRecv).toFixed(1);
-      };
-      view.src = newUrl;
       
-      // Revoke previous URL immediately — image is already decoded
-      if (lastUrl) URL.revokeObjectURL(lastUrl);
-      lastUrl = newUrl;
+      if (typeof ImageDecoder !== 'undefined') {
+        try {
+          var decoder = new ImageDecoder({ data: jpegBytes, type: 'image/jpeg' });
+          decoder.decode().then(function(result) {
+            if (currentSeq < maxRenderedSeq) {
+              result.image.close();
+              return;
+            }
+            maxRenderedSeq = currentSeq;
 
-      // Metrics calculation
-      var now = Date.now();
-      var latency = now - timestamp;
-      if (latency < 0) latency = 0;
+            var frame = result.image;
+            if (view.width !== frame.displayWidth || view.height !== frame.displayHeight) {
+              view.width = frame.displayWidth;
+              view.height = frame.displayHeight;
+            }
+            ctx.drawImage(frame, 0, 0);
+            frame.close();
 
-      if (now - statsT > 1000) {
-        var dt = (now - statsT) / 1000;
-        var fps = (frameCount / dt).toFixed(1);
-        var kbps = (byteCount * 8 / 1000 / dt).toFixed(0);
-        var res = view.naturalWidth ? (view.naturalWidth + 'x' + view.naturalHeight) : '—';
-        var bw = kbps > 1000 ? (kbps/1000).toFixed(1) + ' Mbps' : kbps + ' kbps';
-        var decodeStr = lastDecodeMs ? lastDecodeMs + 'ms' : '—';
-        
-        metrics.textContent = res + '  |  ' + fps + ' FPS  |  ' + bw + '  |  Delay: ' + latency.toFixed(0) + 'ms  |  Decode: ' + decodeStr;
-        
-        frameCount = 0; byteCount = 0; statsT = now;
+            idleScreen.style.display = 'none';
+            view.style.display = 'block';
+            
+            var renderDone = performance.now();
+            lastDecodeMs = (renderDone - frameRecv).toFixed(1);
+
+            renderMetrics();
+          }).catch(function(err) {
+            useCreateImageBitmap();
+          });
+        } catch (e) {
+          useCreateImageBitmap();
+        }
+      } else {
+        useCreateImageBitmap();
+      }
+
+      function useCreateImageBitmap() {
+        var jpegBlob = new Blob([jpegBytes], {type: 'image/jpeg'});
+        createImageBitmap(jpegBlob).then(function(bitmap) {
+          if (currentSeq < maxRenderedSeq) {
+            bitmap.close();
+            return;
+          }
+          maxRenderedSeq = currentSeq;
+
+          if (view.width !== bitmap.width || view.height !== bitmap.height) {
+            view.width = bitmap.width;
+            view.height = bitmap.height;
+          }
+          ctx.drawImage(bitmap, 0, 0);
+          bitmap.close();
+
+          idleScreen.style.display = 'none';
+          view.style.display = 'block';
+          
+          var renderDone = performance.now();
+          lastDecodeMs = (renderDone - frameRecv).toFixed(1);
+
+          renderMetrics();
+        }).catch(function() {});
+      }
+
+      function renderMetrics() {
+        // Render granular metrics once frame is decoded and painted
+        if (senderAt > 0 && ingestAt > 0 && publishAt > 0) {
+          var uplink = ingestAt - senderAt;
+          var server = publishAt - ingestAt;
+          var downlink = nowMs - publishAt;
+          if (uplink < 0) uplink = 0;
+          if (server < 0) server = 0;
+          if (downlink < 0) downlink = 0;
+
+          var total = uplink + server + downlink + parseFloat(lastDecodeMs);
+
+          if (Date.now() - statsT > 1000) {
+            var dt = (Date.now() - statsT) / 1000;
+            var fps = (frameCount / dt).toFixed(1);
+            var kbps = (byteCount * 8 / 1000 / dt).toFixed(0);
+            var res = view.width + 'x' + view.height;
+            var bw = kbps > 1000 ? (kbps/1000).toFixed(1) + ' Mbps' : kbps + ' kbps';
+
+            metrics.innerHTML = res + '  |  ' + fps + ' FPS  |  ' + bw + '<br>' +
+              '<span style="opacity:0.85; font-size:10px;">Uplink: ' + uplink.toFixed(0) + 'ms · ' +
+              'Server: ' + server.toFixed(0) + 'ms · ' +
+              'Downlink: ' + downlink.toFixed(0) + 'ms · ' +
+              'Decode: ' + lastDecodeMs + 'ms · ' +
+              '<strong>E2E Total: ' + total.toFixed(0) + 'ms</strong></span>';
+
+            frameCount = 0; byteCount = 0; statsT = Date.now();
+          }
+        } else {
+          // Telemetry is disabled
+          if (Date.now() - statsT > 1000) {
+            var dt = (Date.now() - statsT) / 1000;
+            var fps = (frameCount / dt).toFixed(1);
+            var kbps = (byteCount * 8 / 1000 / dt).toFixed(0);
+            var res = view.width + 'x' + view.height;
+            var bw = kbps > 1000 ? (kbps/1000).toFixed(1) + ' Mbps' : kbps + ' kbps';
+
+            metrics.textContent = res + '  |  ' + fps + ' FPS  |  ' + bw + '  |  Tracing: Disabled';
+            frameCount = 0; byteCount = 0; statsT = Date.now();
+          }
+        }
       }
     };
 

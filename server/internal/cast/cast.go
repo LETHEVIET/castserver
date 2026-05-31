@@ -2,6 +2,7 @@ package cast
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -179,19 +180,43 @@ func Handler(ctrl *control.Handler) http.HandlerFunc {
 					continue
 				}
 				ingestAt := time.Now()
-				if _, err := pw.Write(payload); err != nil {
+
+				var senderAt time.Time
+				var webmPayload []byte
+				if len(payload) >= 8 {
+					ms := int64(binary.BigEndian.Uint64(payload[:8]))
+					if ms > 0 {
+						senderAt = time.UnixMilli(ms)
+					}
+					webmPayload = payload[8:]
+				} else {
+					webmPayload = payload
+				}
+
+				if _, err := pw.Write(webmPayload); err != nil {
 					return
 				}
 				pipeAt := time.Now()
-				tracker.RecordIngest(ingestAt, pipeAt)
+				tracker.RecordIngest(senderAt, ingestAt, pipeAt)
 			}
 		}()
 
 		hub := ctrl.Hub()
 		tracker := ctrl.Latency()
-		if err := stream.PumpJPEGsToHub(stdout, hub, func(frameBytes int, transcodeAt, pumpDoneAt time.Time) {
-			tracker.RecordFrame(frameBytes, transcodeAt, pumpDoneAt)
+		if err := stream.PumpJPEGsToHub(stdout, hub, func(frame []byte, transcodeAt, pumpDoneAt time.Time) {
+			senderAt, ingestAt := tracker.RecordFrame(len(frame), transcodeAt, pumpDoneAt)
 			ctrl.IncrementFrames(1)
+
+			// Prepend 24-byte telemetry metadata header
+			// [8-byte senderAt][8-byte ingestAt][8-byte publishAt]
+			payload := make([]byte, 24+len(frame))
+			if tracker.IsEnabled() && !senderAt.IsZero() && !ingestAt.IsZero() {
+				binary.BigEndian.PutUint64(payload[0:8], uint64(senderAt.UnixMilli()))
+				binary.BigEndian.PutUint64(payload[8:16], uint64(ingestAt.UnixMilli()))
+				binary.BigEndian.PutUint64(payload[16:24], uint64(pumpDoneAt.UnixMilli()))
+			}
+			copy(payload[24:], frame)
+			hub.Publish(payload)
 		}); err != nil && err != io.EOF {
 			log.Printf("cast: pump jpegs: %v", err)
 		}
@@ -214,8 +239,10 @@ func buildCastFFmpeg(ctx context.Context, w, h, fps, quality int, scaler string,
 
 	args := []string{
 		"-hide_banner", "-loglevel", "warning",
-		"-fflags", "nobuffer", "-flags", "low_delay",
-		"-probesize", "32", "-analyzeduration", "0",
+		"-avoid_negative_ts", "make_zero",
+		"-fflags", "nobuffer+discardcorrupt+fastseek",
+		"-flags", "low_delay",
+		"-threads", "1", // Eliminate frame-threading buffering delay
 	}
 
 	if hwAccel {
@@ -225,10 +252,12 @@ func buildCastFFmpeg(ctx context.Context, w, h, fps, quality int, scaler string,
 	}
 
 	args = append(args,
+		"-f", "matroska",
 		"-i", "pipe:0",
 		"-an", "-sn", "-dn",
 		"-vf", vf,
 		"-c:v", "mjpeg",
+		"-huffman", "default", // Use default Huffman tables to massively speed up encoding
 		"-q:v", strconv.Itoa(quality),
 		"-vsync", "drop",
 		"-flush_packets", "1",

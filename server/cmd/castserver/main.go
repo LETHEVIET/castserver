@@ -69,6 +69,23 @@ func main() {
 		json.NewEncoder(w).Encode(ctrl.Latency().Stats())
 	})
 
+	mux.HandleFunc("/stats/telemetry/toggle", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var req struct {
+			Enabled bool `json:"enabled"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		ctrl.Latency().SetEnabled(req.Enabled)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok", "enabled": ctrl.Latency().IsEnabled()})
+	})
+
 	fmt.Printf("Ready. Admin UI: http://localhost%s/  |  Viewer: /web\n", *listenAddr)
 
 	srv := &http.Server{

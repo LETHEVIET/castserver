@@ -28,12 +28,12 @@ type Preset struct {
 // Presets returns the built-in preset definitions.
 func Presets() []Preset {
 	return []Preset{
-		{Name: "Low Latency", Width: 854, Height: 480, FPS: 20, Bitrate: 1000, JPEGQuality: 10, Scaler: "fast_bilinear", ChunkMS: 50, HardwareAccel: false},
-		{Name: "Balanced", Width: 1280, Height: 720, FPS: 30, Bitrate: 2000, JPEGQuality: 6, Scaler: "lanczos", ChunkMS: 80, HardwareAccel: false},
-		{Name: "High Quality", Width: 1920, Height: 1080, FPS: 60, Bitrate: 8000, JPEGQuality: 3, Scaler: "lanczos", ChunkMS: 100, HardwareAccel: false},
-		{Name: "Native (No Scaling)", Width: 0, Height: 0, FPS: 60, Bitrate: 6000, JPEGQuality: 6, Scaler: "none", ChunkMS: 30, HardwareAccel: false},
-		{Name: "NVIDIA Native (GPU)", Width: 0, Height: 0, FPS: 60, Bitrate: 6000, JPEGQuality: 6, Scaler: "none", ChunkMS: 30, HardwareAccel: true},
-		{Name: "Custom", Width: 0, Height: 0, FPS: 0, Bitrate: 0, JPEGQuality: 0, Scaler: "lanczos", ChunkMS: 100, HardwareAccel: false},
+		{Name: "Low Latency", Width: 854, Height: 480, FPS: 20, Bitrate: 1000, JPEGQuality: 10, Scaler: "fast_bilinear", ChunkMS: 50, HardwareAccel: true},
+		{Name: "Balanced", Width: 1280, Height: 720, FPS: 30, Bitrate: 2000, JPEGQuality: 6, Scaler: "lanczos", ChunkMS: 80, HardwareAccel: true},
+		{Name: "High Quality", Width: 1920, Height: 1080, FPS: 60, Bitrate: 8000, JPEGQuality: 3, Scaler: "lanczos", ChunkMS: 100, HardwareAccel: true},
+		{Name: "Native (No Scaling)", Width: 0, Height: 0, FPS: 60, Bitrate: 6000, JPEGQuality: 6, Scaler: "none", ChunkMS: 15, HardwareAccel: true},
+		{Name: "NVIDIA Native (GPU)", Width: 0, Height: 0, FPS: 60, Bitrate: 6000, JPEGQuality: 6, Scaler: "none", ChunkMS: 15, HardwareAccel: true},
+		{Name: "Custom", Width: 0, Height: 0, FPS: 0, Bitrate: 0, JPEGQuality: 0, Scaler: "lanczos", ChunkMS: 100, HardwareAccel: true},
 	}
 }
 
@@ -168,18 +168,18 @@ func (h *Handler) HandleStats(w http.ResponseWriter, r *http.Request) {
 
 // HandlePresetsLookup looks up a preset by name and returns its parameters.
 // Used internally by the cast handler. Returns the preset and true, or
-// the Balanced preset and false if not found.
+// the NVIDIA Native (GPU) preset and false if not found.
 func LookupPreset(name string) (Preset, bool) {
 	for _, p := range Presets() {
 		if p.Name == name {
 			return p, true
 		}
 	}
-	// Default to Native (No Scaling).
+	// Default to NVIDIA Native (GPU).
 	for _, p := range Presets() {
-		if p.Name == "Native (No Scaling)" {
+		if p.Name == "NVIDIA Native (GPU)" {
 			return p, false
 		}
 	}
-	return Preset{Name: "Native (No Scaling)", Width: 0, Height: 0, FPS: 60, Bitrate: 6000, JPEGQuality: 6, Scaler: "none", ChunkMS: 30}, false
+	return Preset{Name: "NVIDIA Native (GPU)", Width: 0, Height: 0, FPS: 60, Bitrate: 6000, JPEGQuality: 6, Scaler: "none", ChunkMS: 30, HardwareAccel: true}, false
 }

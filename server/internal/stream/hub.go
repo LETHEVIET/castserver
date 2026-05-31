@@ -95,12 +95,11 @@ func (h *Hub) SubscriberCount() int {
 // complete JPEG frame to hub. Returns when r reaches EOF or a parse
 // error occurs.
 //
-// If onFrame is non-nil, it is called after every published frame with the
-// frame size in bytes, the timestamp when raw bytes arrived from ffmpeg,
-// and the timestamp after the frame was parsed and published. This lets
-// callers record transcode and pump latency without the pump package
-// needing to import telemetry.
-func PumpJPEGsToHub(r io.Reader, hub *Hub, onFrame func(frameBytes int, transcodeAt, pumpDoneAt time.Time)) error {
+// If onFrame is non-nil, it is called after every parsed frame with the
+// frame bytes, the timestamp when raw bytes arrived from ffmpeg,
+// and the timestamp after the frame was parsed. This lets
+// callers record transcode and pump latency and customize hub publishing.
+func PumpJPEGsToHub(r io.Reader, hub *Hub, onFrame func(frame []byte, transcodeAt, pumpDoneAt time.Time)) error {
 	const (
 		readChunk = 64 * 1024
 		maxFrame  = 2 * 1024 * 1024
@@ -137,10 +136,11 @@ func PumpJPEGsToHub(r io.Reader, hub *Hub, onFrame func(frameBytes int, transcod
 				frameEnd := start + 2 + end + 2
 				frame := make([]byte, frameEnd-start)
 				copy(frame, buf[start:frameEnd])
-				hub.Publish(frame)
 				pumpDone := time.Now()
 				if onFrame != nil {
-					onFrame(len(frame), readAt, pumpDone)
+					onFrame(frame, readAt, pumpDone)
+				} else {
+					hub.Publish(frame)
 				}
 				buf = append(buf[:0], buf[frameEnd:]...)
 			}
