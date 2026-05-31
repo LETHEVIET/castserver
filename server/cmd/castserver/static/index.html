@@ -1,0 +1,840 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Admin - CastServer</title>
+<style>
+  :root {
+    --bg: #09090b;
+    --card-bg: #18181b;
+    --border: rgba(255, 255, 255, 0.06);
+    --text: #f4f4f5;
+    --text-muted: #a1a1aa;
+    --accent: #10b981;
+    --accent-hover: #059669;
+    --danger: #f43f5e;
+    --danger-hover: #e11d48;
+    --focus: #3b82f6;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    font-family: system-ui, -apple-system, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    margin: 0;
+    padding: 24px 16px;
+    line-height: 1.5;
+  }
+
+  .container {
+    max-width: 1000px;
+    margin: 0 auto;
+  }
+
+  /* Sleek Header */
+  header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding-bottom: 16px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 24px;
+    flex-wrap: wrap;
+    gap: 12px;
+  }
+
+  h1 {
+    font-size: 20px;
+    font-weight: 600;
+    margin: 0;
+    letter-spacing: -0.02em;
+  }
+
+  #serverStatus {
+    font-size: 12px;
+    font-weight: 500;
+    background: rgba(255,255,255,0.03);
+    border: 1px solid var(--border);
+    padding: 6px 12px;
+    border-radius: 16px;
+    color: var(--text-muted);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .status-dot {
+    width: 6px; height: 6px;
+    border-radius: 50%;
+    background: var(--text-muted);
+    display: inline-block;
+  }
+  .status-dot.ok {
+    background: var(--accent);
+    box-shadow: 0 0 8px var(--accent);
+  }
+  .status-dot.err {
+    background: var(--danger);
+    box-shadow: 0 0 8px var(--danger);
+  }
+
+  /* Grid Layout */
+  .grid {
+    display: grid;
+    grid-template-columns: 1.2fr 1fr;
+    gap: 24px;
+    align-items: start;
+  }
+
+  @media (max-width: 768px) {
+    .grid {
+      grid-template-columns: 1fr;
+    }
+  }
+
+  .card {
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px;
+    margin-bottom: 24px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+  }
+
+  .card h2 {
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-muted);
+    margin-top: 0;
+    margin-bottom: 20px;
+    font-weight: 600;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 8px;
+  }
+
+  /* Sleek controls */
+  .row {
+    margin-bottom: 14px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+  
+  .row:last-child {
+    margin-bottom: 0;
+  }
+
+  label {
+    width: 120px;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text-muted);
+  }
+
+  select, input {
+    background: #09090b;
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 6px 12px;
+    border-radius: 6px;
+    font-size: 13px;
+    outline: none;
+    transition: border-color 0.2s;
+    font-family: inherit;
+  }
+
+  select:focus, input:focus {
+    border-color: var(--focus);
+  }
+
+  select:disabled, input:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+
+  .hidden { display: none; }
+
+  /* Buttons */
+  button {
+    font-family: inherit;
+    font-size: 13px;
+    font-weight: 600;
+    padding: 8px 16px;
+    border-radius: 6px;
+    cursor: pointer;
+    border: none;
+    transition: background 0.2s, opacity 0.2s;
+  }
+
+  button.primary {
+    background: var(--accent);
+    color: #fff;
+  }
+  button.primary:hover {
+    background: var(--accent-hover);
+  }
+
+  button.stop {
+    background: var(--danger);
+    color: #fff;
+  }
+  button.stop:hover {
+    background: var(--danger-hover);
+  }
+
+  button:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+
+  /* QR & Share URL section */
+  #shareSection {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 16px;
+    padding: 20px;
+    background: rgba(255,255,255,0.01);
+    border-radius: 8px;
+    border: 1px solid var(--border);
+  }
+
+  #qrcode {
+    background: #fff;
+    padding: 8px;
+    border-radius: 8px;
+    display: inline-block;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.25);
+  }
+
+  .share-url-container {
+    display: flex;
+    align-items: center;
+    width: 100%;
+    background: #09090b;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    overflow: hidden;
+  }
+
+  #viewerUrl {
+    flex-grow: 1;
+    font-family: monospace;
+    font-size: 12px;
+    padding: 8px 12px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    color: var(--text-muted);
+  }
+
+  #copyBtn {
+    background: rgba(255,255,255,0.04);
+    border-left: 1px solid var(--border);
+    border-radius: 0;
+    padding: 8px 14px;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text);
+  }
+  #copyBtn:hover {
+    background: rgba(255,255,255,0.08);
+  }
+
+  /* Ultra-minimal Tables */
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+  }
+
+  td, th {
+    padding: 10px 0;
+    text-align: left;
+  }
+
+  th {
+    color: var(--text-muted);
+    font-weight: 500;
+    border-bottom: 1px solid var(--border);
+  }
+
+  tr:not(:last-child) td {
+    border-bottom: 1px dashed var(--border);
+  }
+
+  td.val {
+    text-align: right;
+    font-weight: 600;
+    font-family: monospace;
+  }
+
+  /* Control status message */
+  #controlStatus {
+    font-size: 12px;
+    margin-top: 14px;
+    margin-bottom: 0;
+    font-weight: 500;
+  }
+  #controlStatus.ok { color: var(--accent); }
+  #controlStatus.err { color: var(--danger); }
+
+  /* Live Preview Video */
+  #castPreview {
+    width: 100%;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    margin-top: 14px;
+    display: none;
+    background: #000;
+  }
+
+  /* Latency bar chart */
+  .lat-bar {
+    height: 6px;
+    background: rgba(255,255,255,0.04);
+    border-radius: 3px;
+    overflow: hidden;
+  }
+  .lat-fill {
+    height: 100%;
+    background: var(--focus);
+    border-radius: 3px;
+    transition: width 0.3s ease;
+    min-width: 2px;
+    width: 0;
+  }
+  .lat-fill.accent { background: var(--accent); }
+</style>
+</head>
+<body>
+
+<div class="container">
+  <header>
+    <h1>castserver</h1>
+    <div id="serverStatus"><span class="status-dot"></span> Checking...</div>
+  </header>
+
+  <div class="grid">
+    <!-- Left Column: Controls -->
+    <div>
+      <div class="card">
+        <h2>Cast Configuration</h2>
+        
+        <div class="row">
+          <label for="preset">Preset:</label>
+          <select id="preset" onchange="onPresetChange()"></select>
+        </div>
+
+        <div id="customFields" class="hidden">
+          <div class="row">
+            <label>Resolution:</label>
+            <input id="width" type="number" min="320" max="3840" step="2" style="width:75px;">
+            <span style="font-size:12px;color:var(--text-muted)">×</span>
+            <input id="height" type="number" min="200" max="2160" step="2" style="width:75px;">
+          </div>
+          <div class="row">
+            <label for="fps">FPS:</label>
+            <select id="fps">
+              <option value="10">10</option>
+              <option value="15">15</option>
+              <option value="20">20</option>
+              <option value="30">30</option>
+              <option value="60">60</option>
+            </select>
+          </div>
+          <div class="row">
+            <label for="bitrate">Bitrate (kbps):</label>
+            <input id="bitrate" type="number" min="500" max="50000" step="100" style="width:100px;">
+          </div>
+          <div class="row">
+            <label for="quality">JPEG quality:</label>
+            <select id="quality">
+              <option value="3">q=3 (near lossless)</option>
+              <option value="6">q=6 (sharp)</option>
+              <option value="10">q=10 (good)</option>
+              <option value="14">q=14 (medium)</option>
+              <option value="20">q=20 (light)</option>
+            </select>
+          </div>
+          <div class="row">
+            <label for="scaler">Scaler:</label>
+            <select id="scaler">
+              <option value="none">None (No Scaling)</option>
+              <option value="lanczos">lanczos (sharp)</option>
+              <option value="fast_bilinear">fast bilinear (fast)</option>
+              <option value="bicubic">bicubic</option>
+              <option value="bilinear">bilinear</option>
+            </select>
+          </div>
+          <div class="row">
+            <label for="chunkMS">Chunk interval:</label>
+            <select id="chunkMS">
+              <option value="50">50ms (low latency)</option>
+              <option value="100">100ms (balanced)</option>
+              <option value="200">200ms</option>
+              <option value="500">500ms (efficient)</option>
+            </select>
+          </div>
+          <div class="row" style="align-items: center;">
+            <label for="hwAccel">NVIDIA GPU Accel:</label>
+            <input id="hwAccel" type="checkbox" style="width: auto; margin-left: 0; transform: scale(1.2);">
+          </div>
+        </div>
+
+        <div class="row" style="margin-top: 20px;">
+          <button id="startBtn" class="primary" onclick="doStart()">Share Screen</button>
+          <button id="stopBtn" class="stop" onclick="doStop()" disabled>Stop</button>
+        </div>
+
+        <p id="controlStatus"></p>
+      </div>
+      
+      <video id="castPreview" autoplay muted playsinline></video>
+    </div>
+
+    <!-- Right Column: Share & Stats -->
+    <div>
+      <div class="card">
+        <h2>Quick Share</h2>
+        <div id="shareSection">
+          <div id="qrcode"></div>
+          <div class="share-url-container">
+            <span id="viewerUrl">...</span>
+            <button id="copyBtn" onclick="copyViewerUrl()">Copy</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Session Stats</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>Metric</th>
+              <th style="text-align:right">Value</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Frames Published</td>
+              <td id="stFrames" class="val">—</td>
+            </tr>
+            <tr>
+              <td>Web Subscribers</td>
+              <td id="stSubs" class="val">—</td>
+            </tr>
+            <tr>
+              <td>Session State</td>
+              <td id="stSession" class="val">—</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="card">
+        <h2>Pipeline Latency</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>Stage</th>
+              <th style="text-align:right">Avg (µs)</th>
+              <th style="width:50%"></th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Pipe Write</td>
+              <td id="ltPipe" class="val">—</td>
+              <td><div class="lat-bar"><div id="ltPipeBar" class="lat-fill"></div></div></td>
+            </tr>
+            <tr>
+              <td>Transcode</td>
+              <td id="ltTranscode" class="val">—</td>
+              <td><div class="lat-bar"><div id="ltTranscodeBar" class="lat-fill accent"></div></div></td>
+            </tr>
+            <tr>
+              <td>JPEG Pump</td>
+              <td id="ltPump" class="val">—</td>
+              <td><div class="lat-bar"><div id="ltPumpBar" class="lat-fill"></div></div></td>
+            </tr>
+            <tr style="border-top: 1px solid var(--border);">
+              <td><strong>Total Server</strong></td>
+              <td id="ltTotal" class="val">—</td>
+              <td></td>
+            </tr>
+          </tbody>
+        </table>
+        <p style="font-size:11px; color:var(--text-muted); margin-top:12px;">
+          Frame #<span id="ltFrameSeq">—</span> · EMA α=0.1
+        </p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+var presets = [];
+
+function loadPresets() {
+  fetch('/presets').then(function(r) { return r.json(); }).then(function(list) {
+    presets = list;
+    var sel = document.getElementById('preset');
+    sel.innerHTML = '';
+    list.forEach(function(p) {
+      var opt = document.createElement('option');
+      opt.value = p.name;
+      opt.textContent = p.name;
+      if (p.name === 'Native (No Scaling)') opt.selected = true;
+      sel.appendChild(opt);
+    });
+    onPresetChange();
+  });
+}
+
+function onPresetChange() {
+  var name = document.getElementById('preset').value;
+  var isCustom = name === 'Custom';
+  document.getElementById('customFields').className = isCustom ? '' : 'hidden';
+
+  if (isCustom) return;
+
+  var p = presets.find(function(p) { return p.name === name; });
+  if (!p) return;
+  document.getElementById('width').value = p.width;
+  document.getElementById('height').value = p.height;
+  document.getElementById('fps').value = String(p.fps);
+  document.getElementById('bitrate').value = p.bitrate;
+  document.getElementById('quality').value = String(p.jpeg_quality);
+  document.getElementById('scaler').value = p.scaler;
+  document.getElementById('chunkMS').value = String(p.chunk_ms);
+  document.getElementById('hwAccel').checked = !!p.hardware_accel;
+}
+
+function readConfig() {
+  var name = document.getElementById('preset').value;
+  if (name !== 'Custom') return { preset: name };
+
+  return {
+    preset: 'Custom',
+    width: parseInt(document.getElementById('width').value, 10) || 1280,
+    height: parseInt(document.getElementById('height').value, 10) || 720,
+    fps: parseInt(document.getElementById('fps').value, 10) || 30,
+    bitrate: parseInt(document.getElementById('bitrate').value, 10) || 2000,
+    quality: parseInt(document.getElementById('quality').value, 10) || 6,
+    scaler: document.getElementById('scaler').value || 'lanczos',
+    chunk_ms: parseInt(document.getElementById('chunkMS').value, 10) || 100,
+    hardware_accel: document.getElementById('hwAccel').checked,
+  };
+}
+
+function setCtrl(msg, isErr) {
+  var el = document.getElementById('controlStatus');
+  el.textContent = msg;
+  el.className = isErr ? 'err' : 'ok';
+}
+
+function setButtons(active) {
+  document.getElementById('startBtn').disabled = active;
+  document.getElementById('stopBtn').disabled = !active;
+  document.getElementById('preset').disabled = active;
+  if (active) {
+    var fields = document.getElementById('customFields');
+    fields.querySelectorAll('input,select').forEach(function(e) { e.disabled = true; });
+  } else {
+    onPresetChange();
+  }
+}
+
+// ---------- Cast ----------
+var castWs = null, castRecorder = null, castStream = null;
+
+function getCastMimeType() {
+  var types = ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm'];
+  for (var i = 0; i < types.length; i++) {
+    if (window.MediaRecorder && MediaRecorder.isTypeSupported(types[i])) return types[i];
+  }
+  return null;
+}
+
+function castCleanup() {
+  if (castRecorder && castRecorder.state !== 'inactive') {
+    try { castRecorder.stop(); } catch (e) {}
+  }
+  if (castStream) {
+    castStream.getTracks().forEach(function(t) { t.stop(); });
+    castStream = null;
+  }
+  if (castWs) {
+    try { castWs.close(); } catch (e) {}
+    castWs = null;
+  }
+  castRecorder = null;
+  var prev = document.getElementById('castPreview');
+  prev.style.display = 'none';
+  prev.srcObject = null;
+  setButtons(false);
+}
+
+function doStop() {
+  setCtrl('Stopping...', false);
+  castCleanup();
+}
+
+function doStart() {
+  var mimeType = getCastMimeType();
+  if (!mimeType) { setCtrl('MediaRecorder not supported in this browser.', true); return; }
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
+    setCtrl('getDisplayMedia not available in this browser.', true);
+    return;
+  }
+
+  var cfg = readConfig();
+  var fps = 30;
+  var bitrate = 2000;
+  var chunkMs = 100;
+
+  if (cfg.preset !== 'Custom') {
+    var p = presets.find(function(preset) { return preset.name === cfg.preset; });
+    if (p) {
+      fps = p.fps || 30;
+      bitrate = p.bitrate || 2000;
+      chunkMs = p.chunk_ms || 100;
+    }
+  } else {
+    fps = cfg.fps || 30;
+    bitrate = cfg.bitrate || 2000;
+    chunkMs = cfg.chunk_ms || 100;
+  }
+
+  setCtrl('Requesting screen capture...', false);
+  navigator.mediaDevices.getDisplayMedia({
+    video: { frameRate: { ideal: fps } },
+    audio: false,
+  }).then(function(s) {
+    castStream = s;
+    castStream.getAudioTracks().forEach(function(t) { castStream.removeTrack(t); });
+
+    var prev = document.getElementById('castPreview');
+    prev.srcObject = castStream;
+    prev.style.display = 'block';
+
+    var proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    var wsUrl = proto + '//' + window.location.host + '/ws/cast';
+
+    setCtrl('Connecting to server...', false);
+    castWs = new WebSocket(wsUrl);
+    castWs.binaryType = 'arraybuffer';
+
+    castWs.onopen = function() {
+      castWs.send(JSON.stringify(cfg));
+      setButtons(true);
+
+      var bitrateBps = bitrate * 1000;
+
+      castRecorder = new MediaRecorder(castStream, {
+        mimeType: mimeType,
+        videoBitsPerSecond: bitrateBps,
+      });
+      castRecorder.ondataavailable = function(e) {
+        if (e.data.size > 0 && castWs && castWs.readyState === WebSocket.OPEN) {
+          e.data.arrayBuffer().then(function(buf) { castWs.send(buf); });
+        }
+      };
+      castRecorder.onerror = function(e) {
+        setCtrl('Recorder error: ' + (e.message || 'unknown'), true);
+        castCleanup();
+      };
+      castRecorder.start(chunkMs);
+      setCtrl('Casting ' + (cfg.preset || 'custom'), false);
+      loadStats();
+    };
+
+    castWs.onmessage = function(ev) {
+      if (typeof ev.data === 'string') {
+        try {
+          var m = JSON.parse(ev.data);
+          if (m.error) { setCtrl('Cast: ' + m.error, true); castCleanup(); }
+        } catch (e) {}
+      }
+    };
+    castWs.onerror = function() { setCtrl('WebSocket error.', true); castCleanup(); };
+    castWs.onclose = function() {
+      if (castWs !== null) { setCtrl('Cast connection closed.', false); castCleanup(); }
+    };
+    castStream.getVideoTracks()[0].onended = function() { doStop(); };
+  }).catch(function(err) {
+    setCtrl('Cast failed: ' + err.message, true);
+  });
+}
+
+// ---------- Stats ----------
+function loadStats() {
+  fetch('/stats').then(function(r) { return r.json(); }).then(function(s) {
+    document.getElementById('stFrames').textContent = s.frames_published != null ? s.frames_published : 0;
+    document.getElementById('stSubs').textContent = s.web_subscribers != null ? s.web_subscribers : 0;
+    
+    var stateTd = document.getElementById('stSession');
+    stateTd.textContent = s.session_active ? 'active' : 'idle';
+    stateTd.style.color = s.session_active ? 'var(--accent)' : 'var(--text-muted)';
+  }).catch(function() {});
+}
+
+function checkServer() {
+  fetch('/health').then(function(r) { return r.json(); }).then(function(obj) {
+    var statusDiv = document.getElementById('serverStatus');
+    statusDiv.innerHTML = '<span class="status-dot ok"></span> Online';
+  }).catch(function(e) {
+    var statusDiv = document.getElementById('serverStatus');
+    statusDiv.innerHTML = '<span class="status-dot err"></span> Offline';
+  });
+}
+
+function showViewerUrl() {
+  var loc = window.location;
+  var url = loc.protocol + '//' + loc.host + '/web';
+  document.getElementById('viewerUrl').textContent = url;
+
+  var qrDiv = document.getElementById('qrcode');
+  var qr = makeQR(url);
+  qrDiv.innerHTML = '';
+  qrDiv.appendChild(qr);
+}
+
+function copyViewerUrl() {
+  var url = document.getElementById('viewerUrl').textContent;
+  navigator.clipboard.writeText(url).then(function() {
+    var copyBtn = document.getElementById('copyBtn');
+    var oldText = copyBtn.textContent;
+    copyBtn.textContent = 'Copied!';
+    copyBtn.style.background = 'var(--accent)';
+    setTimeout(function() {
+      copyBtn.textContent = oldText;
+      copyBtn.style.background = '';
+    }, 2000);
+  });
+}
+
+// ---------- Tiny QR code generator ----------
+function makeQR(text) {
+  var size = 21;
+  var cells = [];
+  for (var i = 0; i < size; i++) { cells.push([]); for (var j = 0; j < size; j++) cells[i].push(false); }
+
+  function fillFinder(r, c) {
+    for (var i = 0; i < 7; i++) for (var j = 0; j < 7; j++) {
+      var border = i === 0 || i === 6 || j === 0 || j === 6;
+      var inner = i >= 2 && i <= 4 && j >= 2 && j <= 4;
+      cells[r+i][c+j] = border || inner;
+    }
+  }
+  fillFinder(0, 0);
+  fillFinder(0, size - 7);
+  fillFinder(size - 7, 0);
+
+  for (var i = 8; i < size - 8; i++) {
+    cells[6][i] = i % 2 === 0;
+    cells[i][6] = i % 2 === 0;
+  }
+
+  var data = [];
+  var bytes = new TextEncoder().encode(text);
+  data.push(false, true, false, false);
+  var len = bytes.length;
+  for (var b = 7; b >= 0; b--) data.push((len >> b) & 1 ? true : false);
+  for (var k = 0; k < bytes.length; k++) {
+    for (var b = 7; b >= 0; b--) data.push((bytes[k] >> b) & 1 ? true : false);
+  }
+  var rem = 152 - data.length;
+  for (var i = 0; i < Math.min(rem, 4); i++) data.push(false);
+  while (data.length % 8 !== 0) data.push(false);
+  var padBytes = [0xEC, 0x11];
+  var pi = 0;
+  while (data.length < 152) {
+    for (var b = 7; b >= 0; b--) data.push((padBytes[pi] >> b) & 1 ? true : false);
+    pi = (pi + 1) % 2;
+  }
+
+  var di = 0;
+  var col = size - 1;
+  var up = true;
+  while (col > 0) {
+    if (col === 6) col--;
+    if (up) {
+      for (var r = size - 1; r >= 0; r--) {
+        for (var c = col; c >= col - 1; c--) {
+          if (!cells[r] || cells[r][c] !== false) continue;
+          if (di < data.length) { cells[r][c] = data[di]; di++; }
+        }
+      }
+    } else {
+      for (var r = 0; r < size; r++) {
+        for (var c = col; c >= col - 1; c--) {
+          if (!cells[r] || cells[r][c] !== false) continue;
+          if (di < data.length) { cells[r][c] = data[di]; di++; }
+        }
+      }
+    }
+    up = !up;
+    col -= 2;
+  }
+
+  var formatBits = [true, false, true, false, true, false, false, false, false, false, true, false, false, true, false];
+  for (var i = 0; i < 6; i++) cells[i][8] = formatBits[i];
+  for (var i = 6; i < 8; i++) cells[i][8] = formatBits[i];
+  for (var i = 0; i < 6; i++) cells[8][size-1-i] = formatBits[i];
+  for (var i = 6; i < 8; i++) cells[8][size-1-i] = formatBits[i];
+  cells[7][8] = formatBits[6]; cells[8][8] = formatBits[7]; cells[8][7] = formatBits[8];
+  for (var i = 0; i < 7; i++) cells[size-1-i][8] = formatBits[8+i];
+  cells[size-8][8] = true;
+
+  var scale = 4;
+  var margin = 4;
+  var canvasSize = (size + 2 * margin) * scale;
+  var canvas = document.createElement('canvas');
+  canvas.width = canvasSize;
+  canvas.height = canvasSize;
+  canvas.style.width = String(canvasSize) + 'px';
+  canvas.style.height = String(canvasSize) + 'px';
+  var ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(0, 0, canvasSize, canvasSize);
+  ctx.fillStyle = '#000';
+  for (var r = 0; r < size; r++) {
+    for (var c = 0; c < size; c++) {
+      if (cells[r][c]) ctx.fillRect((margin + c) * scale, (margin + r) * scale, scale, scale);
+    }
+  }
+  return canvas;
+}
+
+function loadLatency() {
+  fetch('/stats/latency').then(function(r) { return r.json(); }).then(function(s) {
+    var maxUs = Math.max(s.avg_pipe_write_us, s.avg_transcode_us, s.avg_pump_us, 1);
+
+    document.getElementById('ltPipe').textContent = s.avg_pipe_write_us;
+    document.getElementById('ltTranscode').textContent = s.avg_transcode_us;
+    document.getElementById('ltPump').textContent = s.avg_pump_us;
+    document.getElementById('ltTotal').textContent = s.avg_total_us;
+    document.getElementById('ltFrameSeq').textContent = s.frame_seq;
+
+    document.getElementById('ltPipeBar').style.width = (s.avg_pipe_write_us / maxUs * 100) + '%';
+    document.getElementById('ltTranscodeBar').style.width = (s.avg_transcode_us / maxUs * 100) + '%';
+    document.getElementById('ltPumpBar').style.width = (s.avg_pump_us / maxUs * 100) + '%';
+  }).catch(function() {});
+}
+
+loadPresets();
+showViewerUrl();
+checkServer();
+loadStats();
+loadLatency();
+setInterval(function() { checkServer(); loadStats(); loadLatency(); }, 2000);
+</script>
+
+</body>
+</html>

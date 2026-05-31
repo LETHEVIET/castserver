@@ -9,38 +9,41 @@ import (
 	"net/http"
 	"os/exec"
 	"strconv"
+	"time"
 
-	"3dsstreaming/internal/control"
-	"3dsstreaming/internal/ingest"
-	"3dsstreaming/internal/transport"
+	"castserver/internal/control"
+	"castserver/internal/stream"
 
 	"github.com/gorilla/websocket"
 )
 
 var upgrader = websocket.Upgrader{
-	ReadBufferSize:  4096,
+	ReadBufferSize:  128 * 1024,
 	WriteBufferSize: 4096,
 	CheckOrigin: func(r *http.Request) bool {
-		return true // allow all origins for local network use
+		return true
 	},
 }
 
-// Config is the first (text) message sent by the browser. ClientAddr is only
-// required when Target is "udp".
+// Config is the first (text) message sent by the browser.
+// If Preset is set, all other fields are derived server-side.
+// For custom mode, Width/Height/FPS/Quality/Bitrate/Scaler/ChunkMS are used directly.
 type Config struct {
-	Target     string `json:"target"`      // "udp" (default) or "web"
-	ClientAddr string `json:"client_addr"` // 3DS ip:port — required for udp
-	Width      int    `json:"width"`
-	Height     int    `json:"height"`
-	FPS        int    `json:"fps"`
-	Quality    int    `json:"quality"` // mjpeg q:v for target=web
+	Preset        string `json:"preset"`
+	Width         int    `json:"width"`
+	Height        int    `json:"height"`
+	FPS           int    `json:"fps"`
+	Quality       int    `json:"quality"` // JPEG -q:v
+	Bitrate       int    `json:"bitrate"` // kbps
+	Scaler        string `json:"scaler"`
+	ChunkMS       int    `json:"chunk_ms"`
+	HardwareAccel bool   `json:"hardware_accel"`
 }
 
 // Handler returns an http.HandlerFunc that upgrades HTTP to WebSocket
 // and runs the screen-cast pipeline. The browser pushes WebM chunks; the
-// server pipes them through ffmpeg to either UDP (3DS) or to the JPEG hub
-// (web client).
-func Handler(ctrl *control.Handler, localAddr string) http.HandlerFunc {
+// server pipes them through ffmpeg to the JPEG hub.
+func Handler(ctrl *control.Handler) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ws, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
@@ -49,7 +52,6 @@ func Handler(ctrl *control.Handler, localAddr string) http.HandlerFunc {
 		}
 		defer ws.Close()
 
-		// 1. Read JSON config (text message).
 		msgType, data, err := ws.ReadMessage()
 		if err != nil {
 			log.Printf("cast: read config failed: %v", err)
@@ -66,45 +68,54 @@ func Handler(ctrl *control.Handler, localAddr string) http.HandlerFunc {
 			return
 		}
 
-		target := cfg.Target
-		if target == "" {
-			target = control.TargetUDP
-		}
-		if target != control.TargetUDP && target != control.TargetWeb {
-			writeText(ws, fmt.Sprintf(`{"error":"invalid target %q (want udp or web)"}`, target))
-			return
-		}
-		if target == control.TargetUDP && cfg.ClientAddr == "" {
-			writeText(ws, `{"error":"client_addr required for target=udp"}`)
-			return
-		}
+		// Resolve parameters from preset or custom override.
+		var sw, sh, sfps, quality, bitrate int
+		var scaler string
+		var chunkMS int
+		var hwAccel bool
 
-		// Resolve stream config: prefer values sent by the browser; fall
-		// back to whatever /play last set; finally to safe defaults.
-		sw, sh, sfps := cfg.Width, cfg.Height, cfg.FPS
-		if sw <= 0 || sh <= 0 || sfps <= 0 {
-			gw, gh, gf := ctrl.GetStreamConfig()
+		if cfg.Preset != "" && cfg.Preset != "Custom" {
+			p, _ := control.LookupPreset(cfg.Preset)
+			sw, sh, sfps = p.Width, p.Height, p.FPS
+			quality = p.JPEGQuality
+			bitrate = p.Bitrate
+			scaler = p.Scaler
+			chunkMS = p.ChunkMS
+			hwAccel = p.HardwareAccel
+		} else {
+			// Custom mode: use fields directly with sensible defaults.
+			sw = cfg.Width
+			sh = cfg.Height
+			sfps = cfg.FPS
+			quality = cfg.Quality
+			bitrate = cfg.Bitrate
+			scaler = cfg.Scaler
+			chunkMS = cfg.ChunkMS
+			hwAccel = cfg.HardwareAccel
+
 			if sw <= 0 || sh <= 0 {
-				sw, sh = gw, gh
+				sw, sh = 1280, 720
 			}
 			if sfps <= 0 {
-				sfps = gf
+				sfps = 30
+			}
+			if quality < 2 || quality > 31 {
+				quality = 6
+			}
+			if bitrate <= 0 {
+				bitrate = 2000
+			}
+			if scaler == "" {
+				scaler = "lanczos"
+			}
+			if chunkMS <= 0 {
+				chunkMS = 100
 			}
 		}
-		if sw <= 0 || sh <= 0 {
-			if target == control.TargetWeb {
-				sw, sh = 480, 320
-			} else {
-				sw, sh = 256, 192
-			}
-		}
-		if sfps <= 0 {
-			sfps = 15
-		}
+
 		ctrl.SetStreamConfig(sw, sh, sfps)
 
-		// 2. Claim the active-session slot.
-		ctx, _, err := ctrl.AcquireSession(target)
+		ctx, _, err := ctrl.AcquireSession()
 		if err != nil {
 			log.Printf("cast: %v", err)
 			writeText(ws, fmt.Sprintf(`{"error":"%s"}`, err))
@@ -113,7 +124,7 @@ func Handler(ctrl *control.Handler, localAddr string) http.HandlerFunc {
 		defer ctrl.ReleaseSession()
 		ctx, cancel := context.WithCancel(ctx)
 		defer cancel()
-		// Honor request lifecycle too.
+
 		go func() {
 			select {
 			case <-r.Context().Done():
@@ -122,15 +133,15 @@ func Handler(ctrl *control.Handler, localAddr string) http.HandlerFunc {
 			}
 		}()
 
-		log.Printf("cast: starting target=%s %dx%d@%d (client=%s)", target, sw, sh, sfps, cfg.ClientAddr)
-		writeText(ws, fmt.Sprintf(`{"status":"streaming","target":"%s","width":%d,"height":%d,"fps":%d}`, target, sw, sh, sfps))
+		log.Printf("cast: starting preset=%q %dx%d@%d q=%d scaler=%s bitrate=%dkbps chunk=%dms hw_accel=%t",
+			cfg.Preset, sw, sh, sfps, quality, scaler, bitrate, chunkMS, hwAccel)
+		writeText(ws, fmt.Sprintf(`{"status":"streaming","width":%d,"height":%d,"fps":%d,"quality":%d,"bitrate":%d,"chunk_ms":%d}`,
+			sw, sh, sfps, quality, bitrate, chunkMS))
 
-		// 3. Pipe: WS binary frames → ffmpeg stdin (webm).
 		pr, pw := io.Pipe()
 		defer pr.Close()
 
-		// 4. Start ffmpeg with the right output format for the target.
-		cmd := buildCastFFmpeg(ctx, target, sw, sh, sfps, cfg.Quality)
+		cmd := buildCastFFmpeg(ctx, sw, sh, sfps, quality, scaler, hwAccel)
 		cmd.Stdin = pr
 		stdout, err := cmd.StdoutPipe()
 		if err != nil {
@@ -156,9 +167,9 @@ func Handler(ctrl *control.Handler, localAddr string) http.HandlerFunc {
 			}
 		}()
 
-		// 5. Pump WS binary messages into ffmpeg stdin.
 		go func() {
 			defer pw.Close()
+			tracker := ctrl.Latency()
 			for {
 				mt, payload, err := ws.ReadMessage()
 				if err != nil {
@@ -167,88 +178,65 @@ func Handler(ctrl *control.Handler, localAddr string) http.HandlerFunc {
 				if mt != websocket.BinaryMessage {
 					continue
 				}
+				ingestAt := time.Now()
 				if _, err := pw.Write(payload); err != nil {
 					return
 				}
+				pipeAt := time.Now()
+				tracker.RecordIngest(ingestAt, pipeAt)
 			}
 		}()
 
-		// 6. Drive output to the configured target.
-		switch target {
-		case control.TargetUDP:
-			sender, err := transport.NewSender(cfg.ClientAddr, localAddr)
-			if err != nil {
-				log.Printf("cast: sender error: %v", err)
-				return
-			}
-			defer sender.Close()
-			ctrl.SetClientAddr(cfg.ClientAddr)
-			defer ctrl.SetClientAddr("")
-
-			frameBytes := sw * sh * 3 / 2
-			frame := make([]byte, frameBytes)
-			for {
-				_, err := io.ReadFull(stdout, frame)
-				if err == io.ErrUnexpectedEOF || err == io.EOF {
-					break
-				}
-				if err != nil {
-					log.Printf("cast: read frame: %v", err)
-					break
-				}
-				if err := sender.SendFrame(frame, uint16(sw), uint16(sh)); err != nil {
-					log.Printf("cast: send frame: %v", err)
-					break
-				}
-				ctrl.IncrementFrames(1)
-				ctrl.IncrementNALs(1)
-			}
-
-		case control.TargetWeb:
-			if err := ingest.PumpJPEGsToHub(stdout, ctrl.Hub()); err != nil && err != io.EOF {
-				log.Printf("cast: pump jpegs: %v", err)
-			}
+		hub := ctrl.Hub()
+		tracker := ctrl.Latency()
+		if err := stream.PumpJPEGsToHub(stdout, hub, func(frameBytes int, transcodeAt, pumpDoneAt time.Time) {
+			tracker.RecordFrame(frameBytes, transcodeAt, pumpDoneAt)
+			ctrl.IncrementFrames(1)
+		}); err != nil && err != io.EOF {
+			log.Printf("cast: pump jpegs: %v", err)
 		}
 
-		log.Printf("cast: stopped (target=%s)", target)
+		log.Printf("cast: stopped")
 	}
 }
 
-func buildCastFFmpeg(ctx context.Context, target string, w, h, fps, quality int) *exec.Cmd {
-	scaleYUV := fmt.Sprintf("scale=%d:%d:flags=fast_bilinear,format=yuv420p", w, h)
-	scaleJPEG := fmt.Sprintf("scale=%d:%d:flags=fast_bilinear,format=yuvj420p", w, h)
+func buildCastFFmpeg(ctx context.Context, w, h, fps, quality int, scaler string, hwAccel bool) *exec.Cmd {
+	var vf string
+	if scaler == "none" || w <= 0 || h <= 0 {
+		vf = "format=yuvj420p"
+	} else {
+		vf = fmt.Sprintf("scale=%d:%d:flags=%s,format=yuvj420p", w, h, scaler)
+	}
 
-	base := []string{
+	if quality < 2 || quality > 31 {
+		quality = 6
+	}
+
+	args := []string{
 		"-hide_banner", "-loglevel", "warning",
 		"-fflags", "nobuffer", "-flags", "low_delay",
 		"-probesize", "32", "-analyzeduration", "0",
-		"-i", "pipe:0",
-		"-an", "-sn", "-dn",
-		"-r", strconv.Itoa(fps),
 	}
 
-	switch target {
-	case control.TargetWeb:
-		if quality < 2 || quality > 31 {
-			quality = 8
-		}
-		args := append(base,
-			"-vf", scaleJPEG,
-			"-c:v", "mjpeg",
-			"-q:v", strconv.Itoa(quality),
-			"-f", "mjpeg",
-			"pipe:1",
-		)
-		return exec.CommandContext(ctx, "ffmpeg", args...)
-	default: // udp
-		args := append(base,
-			"-vf", scaleYUV,
-			"-f", "rawvideo",
-			"-pix_fmt", "yuv420p",
-			"pipe:1",
-		)
-		return exec.CommandContext(ctx, "ffmpeg", args...)
+	if hwAccel {
+		args = append(args, "-hwaccel", "cuda")
+	} else {
+		args = append(args, "-thread_type", "slice", "-threads", "2")
 	}
+
+	args = append(args,
+		"-i", "pipe:0",
+		"-an", "-sn", "-dn",
+		"-vf", vf,
+		"-c:v", "mjpeg",
+		"-q:v", strconv.Itoa(quality),
+		"-vsync", "drop",
+		"-flush_packets", "1",
+		"-f", "mjpeg",
+		"pipe:1",
+	)
+
+	return exec.CommandContext(ctx, "ffmpeg", args...)
 }
 
 func drainStderr(r io.Reader) {

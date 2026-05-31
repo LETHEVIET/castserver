@@ -1,13 +1,19 @@
 // Package stream provides a broadcast hub used to fan out JPEG frames from
-// the active stream session to one or more web-client WebSocket subscribers.
+// the active cast session to one or more viewer WebSocket subscribers.
 //
-// There is one hub per server. The active session (URL ingest or cast)
-// publishes frames to it; /ws/web subscribers attach and receive copies.
-// Slow subscribers get their oldest queued frame dropped — we never block the
-// publisher, since that would back-pressure into the encoder.
+// There is one hub per server. The cast session publishes frames to it;
+// /ws/web subscribers attach and receive copies. Slow subscribers get their
+// oldest queued frame dropped — we never block the publisher, since that
+// would back-pressure into the encoder.
 package stream
 
-import "sync"
+import (
+	"bytes"
+	"fmt"
+	"io"
+	"sync"
+	"time"
+)
 
 // Hub fans out JPEG frames to N subscribers.
 type Hub struct {
@@ -76,4 +82,71 @@ func (h *Hub) HasSubscribers() bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return len(h.subs) > 0
+}
+
+// SubscriberCount returns the number of active subscribers.
+func (h *Hub) SubscriberCount() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return len(h.subs)
+}
+
+// PumpJPEGsToHub reads an MJPEG byte stream from r and publishes each
+// complete JPEG frame to hub. Returns when r reaches EOF or a parse
+// error occurs.
+//
+// If onFrame is non-nil, it is called after every published frame with the
+// frame size in bytes, the timestamp when raw bytes arrived from ffmpeg,
+// and the timestamp after the frame was parsed and published. This lets
+// callers record transcode and pump latency without the pump package
+// needing to import telemetry.
+func PumpJPEGsToHub(r io.Reader, hub *Hub, onFrame func(frameBytes int, transcodeAt, pumpDoneAt time.Time)) error {
+	const (
+		readChunk = 64 * 1024
+		maxFrame  = 2 * 1024 * 1024
+	)
+	soi := []byte{0xFF, 0xD8}
+	eoi := []byte{0xFF, 0xD9}
+
+	buf := make([]byte, 0, 128*1024)
+	tmp := make([]byte, readChunk)
+
+	for {
+		n, err := r.Read(tmp)
+		if n > 0 {
+			readAt := time.Now()
+			buf = append(buf, tmp[:n]...)
+			for {
+				start := bytes.Index(buf, soi)
+				if start < 0 {
+					if len(buf) > 1 {
+						buf = append(buf[:0], buf[len(buf)-1:]...)
+					}
+					break
+				}
+				end := bytes.Index(buf[start+2:], eoi)
+				if end < 0 {
+					if start > 0 {
+						buf = append(buf[:0], buf[start:]...)
+					}
+					if len(buf) > maxFrame {
+						return fmt.Errorf("jpeg frame exceeds %d bytes — stream desynced", maxFrame)
+					}
+					break
+				}
+				frameEnd := start + 2 + end + 2
+				frame := make([]byte, frameEnd-start)
+				copy(frame, buf[start:frameEnd])
+				hub.Publish(frame)
+				pumpDone := time.Now()
+				if onFrame != nil {
+					onFrame(len(frame), readAt, pumpDone)
+				}
+				buf = append(buf[:0], buf[frameEnd:]...)
+			}
+		}
+		if err != nil {
+			return err
+		}
+	}
 }

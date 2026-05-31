@@ -1,0 +1,81 @@
+package main
+
+import (
+	"embed"
+	"encoding/json"
+	"flag"
+	"fmt"
+	"io/fs"
+	"log"
+	"net/http"
+	"os/exec"
+	"time"
+
+	"castserver/internal/cast"
+	"castserver/internal/control"
+	"castserver/internal/webclient"
+)
+
+//go:embed static
+var staticFS embed.FS
+
+func main() {
+	listenAddr := flag.String("listen", ":1108", "HTTP listen address")
+	flag.Parse()
+
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		log.Fatalf("ffmpeg not found in PATH: %v", err)
+	}
+
+	log.Printf("castserver starting...")
+	log.Printf("  HTTP: %s", *listenAddr)
+
+	ctrl := control.NewHandler()
+
+	mux := http.NewServeMux()
+
+	staticSub, err := fs.Sub(staticFS, "static")
+	if err != nil {
+		log.Fatalf("failed to open embedded static fs: %v", err)
+	}
+	mux.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.FS(staticSub))))
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/" {
+			http.NotFound(w, r)
+			return
+		}
+		http.ServeFileFS(w, r, staticFS, "static/index.html")
+	})
+
+	mux.HandleFunc("/presets", ctrl.HandlePresets)
+	mux.HandleFunc("/stats", ctrl.HandleStats)
+	mux.HandleFunc("/ws/cast", cast.Handler(ctrl))
+	mux.HandleFunc("/ws/web", webclient.Handler(ctrl))
+	mux.HandleFunc("/web", func(w http.ResponseWriter, r *http.Request) {
+		http.ServeFileFS(w, r, staticFS, "static/web.html")
+	})
+
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	})
+
+	mux.HandleFunc("/stats/latency", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(ctrl.Latency().Stats())
+	})
+
+	fmt.Printf("Ready. Admin UI: http://localhost%s/  |  Viewer: /web\n", *listenAddr)
+
+	srv := &http.Server{
+		Addr:              *listenAddr,
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+
+	log.Fatal(srv.ListenAndServe())
+}
