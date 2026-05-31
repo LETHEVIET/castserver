@@ -78,6 +78,9 @@ func Handler(ctrl *control.Handler) http.HandlerFunc {
 		if cfg.Preset != "" && cfg.Preset != "Custom" {
 			p, _ := control.LookupPreset(cfg.Preset)
 			sw, sh, sfps = p.Width, p.Height, p.FPS
+			if cfg.FPS > 0 {
+				sfps = cfg.FPS
+			}
 			quality = p.JPEGQuality
 			bitrate = p.Bitrate
 			scaler = p.Scaler

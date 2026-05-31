@@ -330,22 +330,23 @@
           <select id="preset" onchange="onPresetChange()"></select>
         </div>
 
+        <div class="row">
+          <label for="fps">FPS:</label>
+          <select id="fps">
+            <option value="10">10</option>
+            <option value="15">15</option>
+            <option value="20">20</option>
+            <option value="30">30</option>
+            <option value="60">60</option>
+          </select>
+        </div>
+
         <div id="customFields" class="hidden">
           <div class="row">
             <label>Resolution:</label>
             <input id="width" type="number" min="320" max="3840" step="2" style="width:75px;">
             <span style="font-size:12px;color:var(--text-muted)">×</span>
             <input id="height" type="number" min="200" max="2160" step="2" style="width:75px;">
-          </div>
-          <div class="row">
-            <label for="fps">FPS:</label>
-            <select id="fps">
-              <option value="10">10</option>
-              <option value="15">15</option>
-              <option value="20">20</option>
-              <option value="30">30</option>
-              <option value="60">60</option>
-            </select>
           </div>
           <div class="row">
             <label for="bitrate">Bitrate (kbps):</label>
@@ -528,13 +529,14 @@ function onPresetChange() {
 
 function readConfig() {
   var name = document.getElementById('preset').value;
-  if (name !== 'Custom') return { preset: name };
+  var fpsVal = parseInt(document.getElementById('fps').value, 10) || 30;
+  if (name !== 'Custom') return { preset: name, fps: fpsVal };
 
   return {
     preset: 'Custom',
     width: parseInt(document.getElementById('width').value, 10) || 1280,
     height: parseInt(document.getElementById('height').value, 10) || 720,
-    fps: parseInt(document.getElementById('fps').value, 10) || 30,
+    fps: fpsVal,
     bitrate: parseInt(document.getElementById('bitrate').value, 10) || 2000,
     quality: parseInt(document.getElementById('quality').value, 10) || 6,
     scaler: document.getElementById('scaler').value || 'lanczos',
@@ -553,6 +555,7 @@ function setButtons(active) {
   document.getElementById('startBtn').disabled = active;
   document.getElementById('stopBtn').disabled = !active;
   document.getElementById('preset').disabled = active;
+  document.getElementById('fps').disabled = active;
   if (active) {
     var fields = document.getElementById('customFields');
     fields.querySelectorAll('input,select').forEach(function(e) { e.disabled = true; });
