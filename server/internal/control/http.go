@@ -1,7 +1,9 @@
 package control
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -9,17 +11,29 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+
+	"3dsstreaming/internal/stream"
 )
 
 // PlayRequest is the JSON body for POST /play.
 // Source is optional when the server is started with a -source flag.
+// Target selects the output sink: "udp" (3DS) or "web" (browser via /ws/web).
+// Defaults to "udp" when omitted, for back-compat with the 3DS client.
 type PlayRequest struct {
 	Source     string `json:"source"`
+	Target     string `json:"target"`
 	ClientAddr string `json:"client_addr"`
 	Width      int    `json:"width"`
 	Height     int    `json:"height"`
 	FPS        int    `json:"fps"`
+	Quality    int    `json:"quality"` // ffmpeg -q:v for target=web (2..31; default 8)
 }
+
+// Target values accepted by /play and /ws/cast.
+const (
+	TargetUDP = "udp"
+	TargetWeb = "web"
+)
 
 // PlayResponse is returned after a successful /play.
 type PlayResponse struct {
@@ -46,7 +60,8 @@ type ExtractResponse struct {
 }
 
 // Handler manages the HTTP control API. It holds the mutable state
-// that is shared between endpoints (stats counters, current ingest context).
+// that is shared between endpoints (stats counters, current ingest context,
+// and the broadcast hub fed to web-client subscribers).
 type Handler struct {
 	framesSent atomic.Uint64
 	nalsSent   atomic.Uint64
@@ -56,6 +71,69 @@ type Handler struct {
 	width      int
 	height     int
 	fps        int
+
+	// Active session — only one at a time.
+	sessionMu     sync.Mutex
+	sessionCancel context.CancelFunc
+	sessionTarget string // "udp" | "web" | ""
+
+	hub *stream.Hub
+}
+
+// NewHandler returns a fresh Handler with an initialized Hub.
+func NewHandler() *Handler {
+	return &Handler{hub: stream.NewHub(8)}
+}
+
+// Hub returns the broadcast hub used to fan out JPEG frames to /ws/web subs.
+func (h *Handler) Hub() *stream.Hub { return h.hub }
+
+// ErrSessionActive is returned by AcquireSession when a session is running.
+var ErrSessionActive = errors.New("a stream session is already active — POST /stop first")
+
+// AcquireSession claims the single active-session slot. Returns a context
+// whose cancel function tears the session down. Caller must call
+// ReleaseSession on its own goroutine when the pipeline ends.
+func (h *Handler) AcquireSession(target string) (context.Context, context.CancelFunc, error) {
+	h.sessionMu.Lock()
+	defer h.sessionMu.Unlock()
+	if h.sessionCancel != nil {
+		return nil, nil, ErrSessionActive
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	h.sessionCancel = cancel
+	h.sessionTarget = target
+	return ctx, cancel, nil
+}
+
+// ReleaseSession clears the active-session slot. Safe to call multiple times.
+func (h *Handler) ReleaseSession() {
+	h.sessionMu.Lock()
+	if h.sessionCancel != nil {
+		h.sessionCancel = nil
+		h.sessionTarget = ""
+	}
+	h.sessionMu.Unlock()
+}
+
+// StopSession cancels and clears the active session, if any.
+func (h *Handler) StopSession() bool {
+	h.sessionMu.Lock()
+	defer h.sessionMu.Unlock()
+	if h.sessionCancel == nil {
+		return false
+	}
+	h.sessionCancel()
+	h.sessionCancel = nil
+	h.sessionTarget = ""
+	return true
+}
+
+// SessionTarget returns the active session's target ("" if none).
+func (h *Handler) SessionTarget() string {
+	h.sessionMu.Lock()
+	defer h.sessionMu.Unlock()
+	return h.sessionTarget
 }
 
 // SetClientAddr sets the current client address (empty string when idle).

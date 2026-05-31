@@ -6,7 +6,6 @@ import (
 	"log"
 	"net"
 	"sync/atomic"
-	"time"
 
 	lz4 "github.com/pierrec/lz4/v4"
 )
@@ -104,11 +103,7 @@ func (s *Sender) SendFrame(data []byte, width, height uint16) error {
 		if _, err := s.conn.WriteToUDP(datagram, s.dest); err != nil {
 			return fmt.Errorf("send frame %d chunk %d/%d: %w", frameID, i+1, total, err)
 		}
-		// Pace chunks to avoid overwhelming the 3DS WiFi buffer.
-		// 150 µs × 54 chunks ≈ 8 ms per frame, negligible at 15-20 fps.
-		if i < total-1 {
-			time.Sleep(150 * time.Microsecond)
-		}
+
 	}
 
 	return nil

@@ -15,9 +15,12 @@
   .ok { color: #080; }
   .info { color: #06c; }
   .panel { background: #fafafa; border: 1px solid #ddd; padding: 15px; margin: 10px 0; border-radius: 4px; }
+  .row { margin: 8px 0; }
   button { padding: 6px 14px; margin-right: 8px; cursor: pointer; }
+  button.primary { background: #2a6; color: #fff; border: 1px solid #2a6; border-radius: 3px; }
+  button.stop    { background: #c33; color: #fff; border: 1px solid #c33; border-radius: 3px; }
   .hidden { display: none; }
-  label { display: inline-block; min-width: 100px; font-weight: bold; }
+  label { display: inline-block; min-width: 110px; font-weight: bold; vertical-align: top; }
   #castPreview { max-width: 100%; border: 1px solid #ddd; border-radius: 4px; margin-top: 10px; display: none; }
 </style>
 </head>
@@ -26,112 +29,108 @@
 <h1>3DS Stream Server</h1>
 
 <p id="serverStatus">Checking…</p>
+<p>
+  <a href="/web" target="_blank">📱 Open web client</a> — low-latency MJPEG over WebSocket; works on iOS Safari.
+  Default source: <code id="curSource">—</code>
+</p>
 
-<h2>Control</h2>
+<h2>Stream</h2>
 
 <div class="panel">
-  <p>
-    <label>Source type:</label>
+
+  <!-- SOURCE -->
+  <div class="row">
+    <label>Source:</label>
     <select id="sourceType" onchange="onSourceTypeChange()">
       <option value="youtube">YouTube</option>
       <option value="file">Local file</option>
       <option value="url">Raw URL</option>
+      <option value="cast">Cast browser tab/screen</option>
       <option value="default">Server default (-source flag)</option>
     </select>
-  </p>
-
-  <!-- YouTube -->
-  <div id="ytPanel">
-    <p>
-      <label>YouTube URL:</label>
-      <input id="ytUrl" type="text" size="50" placeholder="https://www.youtube.com/watch?v=...">
-    </p>
-    <p class="hint">The server extracts a 480p direct stream via yt-dlp for best 3DS compatibility.</p>
   </div>
 
-  <!-- Local file -->
-  <div id="filePanel" class="hidden">
-    <p>
-      <label>File path:</label>
-      <input id="filePath" type="text" size="50" placeholder="/path/to/video.mp4">
-    </p>
+  <div id="srcYoutube" class="row">
+    <label></label>
+    <input id="ytUrl" type="text" size="50" placeholder="https://www.youtube.com/watch?v=...">
+    <p class="hint" style="margin-left:118px;">The server extracts a 480p direct stream via yt-dlp.</p>
+  </div>
+  <div id="srcFile" class="row hidden">
+    <label></label>
+    <input id="filePath" type="text" size="50" placeholder="/path/to/video.mp4">
+  </div>
+  <div id="srcUrl" class="row hidden">
+    <label></label>
+    <input id="rawUrl" type="text" size="50" placeholder="rtsp://host/path or http://host/stream">
+  </div>
+  <div id="srcCast" class="row hidden">
+    <label></label>
+    <span class="info">When you press Start, your browser will prompt to share a tab, window, or screen.</span>
+  </div>
+  <div id="srcDefault" class="row hidden">
+    <label></label>
+    <span class="info">Uses whatever the server was launched with: <code>./streamserver -source ...</code></span>
   </div>
 
-  <!-- Raw URL -->
-  <div id="urlPanel" class="hidden">
-    <p>
-      <label>Stream URL:</label>
-      <input id="rawUrl" type="text" size="50" placeholder="http://localhost:8080/stream">
-    </p>
-  </div>
-
-  <!-- Server default -->
-  <div id="defaultPanel" class="hidden">
-    <p class="info">Uses whatever the server was started with (e.g. <code>./streamserver -source ...</code>)</p>
-  </div>
-
-  <p>
-    <label>Resolution:</label>
-    <select id="resolution">
-      <option value="200x150">200×150 (33 chunks, lowest latency)</option>
-      <option value="256x192" selected>256×192 (54 chunks, balanced)</option>
-      <option value="320x240">320×240 (83 chunks, best quality)</option>
+  <!-- TARGET -->
+  <div class="row" style="margin-top:14px;">
+    <label>Target:</label>
+    <select id="targetType" onchange="onTargetTypeChange()">
+      <option value="udp">3DS (UDP)</option>
+      <option value="web">Web client (browser)</option>
     </select>
-  </p>
+  </div>
 
-  <p>
-    <label>FPS:</label>
-    <select id="fps">
-      <option value="10">10 fps (weakest WiFi)</option>
-      <option value="15" selected>15 fps (recommended)</option>
-      <option value="20">20 fps (strong WiFi only)</option>
-    </select>
-  </p>
-
-  <p>
-    <label>Client:</label>
+  <div id="tgtUdp" class="row">
+    <label>3DS address:</label>
     <input id="clientAddr" type="text" size="30" placeholder="192.168.1.42:8001">
     <span class="hint">3DS IP : UDP port</span>
-  </p>
+  </div>
+  <div id="tgtWeb" class="row hidden">
+    <label></label>
+    <span class="info">Open <a href="/web" target="_blank">/web</a> on the viewing device — it auto-subscribes once a session is running.</span>
+  </div>
 
-  <p>
-    <button id="playBtn" onclick="doPlay()">Play</button>
-    <button onclick="doStop()">Stop</button>
+  <!-- COMMON -->
+  <div class="row">
+    <label>Resolution:</label>
+    <select id="resolution">
+      <option value="200x150">200×150</option>
+      <option value="256x192" selected>256×192</option>
+      <option value="320x240">320×240</option>
+      <option value="480x320">480×320</option>
+      <option value="640x360">640×360</option>
+    </select>
+    <span class="hint" id="resHint">3DS top-screen-friendly sizes.</span>
+  </div>
+  <div class="row">
+    <label>FPS:</label>
+    <select id="fps">
+      <option value="10">10</option>
+      <option value="15" selected>15</option>
+      <option value="20">20</option>
+    </select>
+  </div>
+  <div class="row" id="qualityRow">
+    <label>JPEG quality:</label>
+    <select id="quality">
+      <option value="4">q=4 (sharp)</option>
+      <option value="8" selected>q=8 (good)</option>
+      <option value="14">q=14 (light)</option>
+    </select>
+    <span class="hint">Lower = sharper, higher bandwidth.</span>
+  </div>
+
+  <div class="row" style="margin-top:14px;">
+    <button id="startBtn" class="primary" onclick="doStart()">Start</button>
+    <button id="stopBtn" class="stop" onclick="doStop()">Stop</button>
     <button onclick="doKeyframe()">Keyframe</button>
-    <button id="castBtn" onclick="startCast()">Cast Tab/Screen</button>
-    <button id="castStopBtn" onclick="stopCast()" disabled>Stop Cast</button>
-  </p>
-  <p class="hint">
-    <strong>Play</strong> ingests the source above on the server.
-    <strong>Cast Tab/Screen</strong> shares this browser's screen/tab and pipes it to the 3DS — uses the resolution, fps, and client above.
-  </p>
+  </div>
   <p id="controlStatus"></p>
   <video id="castPreview" autoplay muted playsinline></video>
 </div>
 
-<h2>Quick Start</h2>
-
-<h3>1. Stream a video file</h3>
-<pre>./streamserver -source file:///path/to/video.mp4</pre>
-<p class="hint">Then on the 3DS just connect — it will use the server default.</p>
-
-<h3>2. Stream from mpv (with playback control)</h3>
-<pre>mkfifo /tmp/mpvstream
-mpv video.mp4 --o=/tmp/mpvstream --of=mpegts --ovc=libx264 --oac=aac &amp;
-./streamserver -source file:///tmp/mpvstream</pre>
-
-<h3>3. Stream your screen (Linux)</h3>
-<pre>ffmpeg -f x11grab -i :0.0 -vf "scale=256:192" -c:v libx264 -f mpegts /tmp/screen.ts &amp;
-./streamserver -source file:///tmp/screen.ts</pre>
-
-<h3>4. Stream from VLC</h3>
-<pre># In VLC: Media → Stream → HTTP, port 8080, path /stream
-./streamserver -source http://localhost:8080/stream</pre>
-
 <h2>Stats</h2>
-<p>
-  <button onclick="loadStats()">Refresh Stats</button>
-</p>
 <table border="1" cellpadding="6">
   <tr><th>Metric</th><th>Value</th></tr>
   <tr><td>Frames sent</td><td id="stFrames">—</td></tr>
@@ -140,9 +139,16 @@ mpv video.mp4 --o=/tmp/mpvstream --of=mpegts --ovc=libx264 --oac=aac &amp;
 </table>
 <pre id="rawStats">{}</pre>
 
+<h2>Quick reference</h2>
+<pre>./streamserver -source file:///path/to/video.mp4    # set a default source
+./streamserver -source rtsp://host/path              # RTSP camera
+
+# /play body shape
+{"source":"...", "target":"udp"|"web", "client_addr":"ip:port", "width":W, "height":H, "fps":F, "quality":Q}</pre>
+
 <script>
 function api(method, path, body) {
-  const opts = { method: method, headers: {} };
+  var opts = { method: method, headers: {} };
   if (body) {
     opts.headers['Content-Type'] = 'application/json';
     opts.body = JSON.stringify(body);
@@ -172,89 +178,99 @@ function setCtrl(msg, isErr) {
 }
 
 function onSourceTypeChange() {
-  var type = document.getElementById('sourceType').value;
-  document.getElementById('ytPanel').className    = type === 'youtube' ? '' : 'hidden';
-  document.getElementById('filePanel').className  = type === 'file'    ? '' : 'hidden';
-  document.getElementById('urlPanel').className   = type === 'url'     ? '' : 'hidden';
-  document.getElementById('defaultPanel').className = type === 'default' ? '' : 'hidden';
+  var t = document.getElementById('sourceType').value;
+  document.getElementById('srcYoutube').className = t === 'youtube' ? 'row' : 'row hidden';
+  document.getElementById('srcFile').className    = t === 'file'    ? 'row' : 'row hidden';
+  document.getElementById('srcUrl').className     = t === 'url'     ? 'row' : 'row hidden';
+  document.getElementById('srcCast').className    = t === 'cast'    ? 'row' : 'row hidden';
+  document.getElementById('srcDefault').className = t === 'default' ? 'row' : 'row hidden';
 }
 
-function getSource() {
-  var type = document.getElementById('sourceType').value;
+function onTargetTypeChange() {
+  var t = document.getElementById('targetType').value;
+  document.getElementById('tgtUdp').className = t === 'udp' ? 'row' : 'row hidden';
+  document.getElementById('tgtWeb').className = t === 'web' ? 'row' : 'row hidden';
+  // Quality only matters for web target.
+  document.getElementById('qualityRow').className = t === 'web' ? 'row' : 'row hidden';
+  // Hint depends on target.
+  document.getElementById('resHint').textContent =
+    t === 'web' ? 'Higher resolutions OK on a phone — 480×320 or 640×360 work well.'
+                : '3DS top-screen-friendly sizes.';
+}
+
+function getSource(type) {
   if (type === 'youtube') return document.getElementById('ytUrl').value.trim();
   if (type === 'file')    return 'file://' + document.getElementById('filePath').value.trim();
   if (type === 'url')     return document.getElementById('rawUrl').value.trim();
-  if (type === 'default') return '';
-  return '';
+  return ''; // default → empty so server uses its -source flag
 }
 
-function doPlay() {
-  var clientAddr = document.getElementById('clientAddr').value.trim();
-  if (!clientAddr) {
-    setCtrl('Client Address is required.', true);
+function readCommon() {
+  var resVal = document.getElementById('resolution').value.split('x');
+  return {
+    width:   parseInt(resVal[0], 10),
+    height:  parseInt(resVal[1], 10),
+    fps:     parseInt(document.getElementById('fps').value, 10),
+    quality: parseInt(document.getElementById('quality').value, 10),
+  };
+}
+
+function doStart() {
+  var srcType = document.getElementById('sourceType').value;
+  var tgtType = document.getElementById('targetType').value;
+  var common = readCommon();
+
+  if (tgtType === 'udp' && !document.getElementById('clientAddr').value.trim()) {
+    setCtrl('3DS address is required for UDP target.', true);
     return;
   }
 
-  var type = document.getElementById('sourceType').value;
-  var source = getSource();
+  if (srcType === 'cast') {
+    startCast(tgtType, common);
+    return;
+  }
 
-  if (type === 'youtube') {
-    if (!source) {
-      setCtrl('YouTube URL is required.', true);
-      return;
-    }
+  // YouTube needs an extract step first.
+  if (srcType === 'youtube') {
+    var yt = getSource('youtube');
+    if (!yt) { setCtrl('YouTube URL is required.', true); return; }
     setCtrl('Extracting direct stream URL…', false);
-    api('POST', '/extract', { url: source }).then(function(res) {
-      if (!res.ok) {
-        setCtrl('Extraction failed: ' + JSON.stringify(res.data), true);
-        return;
-      }
-      var direct = res.data.direct_url;
-      var resVal = document.getElementById('resolution').value.split('x');
-      var width  = parseInt(resVal[0], 10);
-      var height = parseInt(resVal[1], 10);
-      var fps    = parseInt(document.getElementById('fps').value, 10);
-
-      setCtrl('Got direct URL, starting stream…', false);
-      api('POST', '/play', {
-        source: direct,
-        client_addr: clientAddr,
-        width: width,
-        height: height,
-        fps: fps
-      }).then(function(res2) {
-        setCtrl(res2.ok ? 'Playing' : 'Error ' + res2.status + ': ' + JSON.stringify(res2.data), !res2.ok);
-        if (res2.ok) loadStats();
-      });
+    api('POST', '/extract', { url: yt }).then(function(res) {
+      if (!res.ok) { setCtrl('Extraction failed: ' + JSON.stringify(res.data), true); return; }
+      sendPlay(res.data.direct_url, tgtType, common);
     });
     return;
   }
 
-  // Non-YouTube sources go straight to /play
-  if (type !== 'default' && !source) {
+  var source = getSource(srcType);
+  if (srcType !== 'default' && !source) {
     setCtrl('Source is required.', true);
     return;
   }
+  sendPlay(source, tgtType, common);
+}
 
-  var resVal = document.getElementById('resolution').value.split('x');
-  var width  = parseInt(resVal[0], 10);
-  var height = parseInt(resVal[1], 10);
-  var fps    = parseInt(document.getElementById('fps').value, 10);
-
-  setCtrl('Starting ' + width + 'x' + height + '@' + fps + '…', false);
-  api('POST', '/play', {
-    source: source,
-    client_addr: clientAddr,
-    width: width,
-    height: height,
-    fps: fps
-  }).then(function(res) {
-    setCtrl(res.ok ? 'Playing' : 'Error ' + res.status + ': ' + JSON.stringify(res.data), !res.ok);
+function sendPlay(source, target, common) {
+  var body = {
+    source:  source,
+    target:  target,
+    width:   common.width,
+    height:  common.height,
+    fps:     common.fps,
+    quality: common.quality,
+  };
+  if (target === 'udp') {
+    body.client_addr = document.getElementById('clientAddr').value.trim();
+  }
+  setCtrl('Starting ' + target + ' session ' + common.width + 'x' + common.height + '@' + common.fps + '…', false);
+  api('POST', '/play', body).then(function(res) {
+    setCtrl(res.ok ? 'Playing (' + target + ')' : 'Error ' + res.status + ': ' + JSON.stringify(res.data), !res.ok);
     if (res.ok) loadStats();
   });
 }
 
 function doStop() {
+  if (castStream) { stopCast(); return; }
   setCtrl('Stopping…', false);
   api('POST', '/stop').then(function(res) {
     setCtrl(res.ok ? 'Stopped' : 'Error ' + res.status + ': ' + JSON.stringify(res.data), !res.ok);
@@ -269,7 +285,25 @@ function doKeyframe() {
   });
 }
 
-// ---------- Browser cast (screen / tab capture) ----------
+function loadSource() {
+  api('GET', '/source').then(function(res) {
+    var el = document.getElementById('curSource');
+    el.textContent = (res.ok && res.data && res.data.source) ? res.data.source : '— (none)';
+  });
+}
+
+function loadStats() {
+  api('GET', '/stats').then(function(res) {
+    if (res.ok) {
+      document.getElementById('stFrames').textContent = res.data.frames_sent != null ? res.data.frames_sent : 0;
+      document.getElementById('stNALs').textContent = res.data.nals_sent != null ? res.data.nals_sent : 0;
+      document.getElementById('stClient').textContent = res.data.client_addr || '—';
+      document.getElementById('rawStats').textContent = JSON.stringify(res.data, null, 2);
+    }
+  });
+}
+
+// ---------- Cast (browser screen/tab capture) ----------
 var castWs = null, castRecorder = null, castStream = null;
 
 function getCastMimeType() {
@@ -296,8 +330,6 @@ function castCleanup() {
   var prev = document.getElementById('castPreview');
   prev.style.display = 'none';
   prev.srcObject = null;
-  document.getElementById('castBtn').disabled = false;
-  document.getElementById('castStopBtn').disabled = true;
 }
 
 function stopCast() {
@@ -305,32 +337,17 @@ function stopCast() {
   castCleanup();
 }
 
-function startCast() {
-  var clientAddr = document.getElementById('clientAddr').value.trim();
-  if (!clientAddr) {
-    setCtrl('Client Address is required.', true);
-    return;
-  }
+function startCast(targetType, common) {
   var mimeType = getCastMimeType();
-  if (!mimeType) {
-    setCtrl('MediaRecorder is not supported in this browser.', true);
-    return;
-  }
+  if (!mimeType) { setCtrl('MediaRecorder is not supported in this browser.', true); return; }
   if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
     setCtrl('getDisplayMedia is not available in this browser.', true);
     return;
   }
 
-  var resVal = document.getElementById('resolution').value.split('x');
-  var width  = parseInt(resVal[0], 10);
-  var height = parseInt(resVal[1], 10);
-  var fps    = parseInt(document.getElementById('fps').value, 10);
-
-  document.getElementById('castBtn').disabled = true;
   setCtrl('Requesting screen capture…', false);
-
   navigator.mediaDevices.getDisplayMedia({
-    video: { frameRate: { ideal: fps } },
+    video: { frameRate: { ideal: common.fps } },
     audio: false,
   }).then(function(s) {
     castStream = s;
@@ -348,12 +365,17 @@ function startCast() {
     castWs.binaryType = 'arraybuffer';
 
     castWs.onopen = function() {
-      castWs.send(JSON.stringify({
-        client_addr: clientAddr,
-        width: width,
-        height: height,
-        fps: fps,
-      }));
+      var cfg = {
+        target:  targetType,
+        width:   common.width,
+        height:  common.height,
+        fps:     common.fps,
+        quality: common.quality,
+      };
+      if (targetType === 'udp') {
+        cfg.client_addr = document.getElementById('clientAddr').value.trim();
+      }
+      castWs.send(JSON.stringify(cfg));
 
       castRecorder = new MediaRecorder(castStream, {
         mimeType: mimeType,
@@ -369,50 +391,35 @@ function startCast() {
         castCleanup();
       };
       castRecorder.start(100);
-
-      document.getElementById('castStopBtn').disabled = false;
-      setCtrl('Casting to ' + clientAddr + ' (' + width + 'x' + height + '@' + fps + ')', false);
+      setCtrl('Casting (' + targetType + ') ' + common.width + 'x' + common.height + '@' + common.fps, false);
       loadStats();
     };
 
-    castWs.onerror = function() {
-      setCtrl('WebSocket error.', true);
-      castCleanup();
-    };
-    castWs.onclose = function() {
-      // Only surface the closure if we didn't trigger it via stopCast().
-      if (castWs !== null) {
-        setCtrl('Cast connection closed.', false);
-        castCleanup();
+    castWs.onmessage = function(ev) {
+      // Server sends a small JSON envelope on connect.
+      if (typeof ev.data === 'string') {
+        try {
+          var m = JSON.parse(ev.data);
+          if (m.error) { setCtrl('Cast: ' + m.error, true); castCleanup(); }
+        } catch (e) {}
       }
     };
-
+    castWs.onerror = function() { setCtrl('WebSocket error.', true); castCleanup(); };
+    castWs.onclose = function() {
+      if (castWs !== null) { setCtrl('Cast connection closed.', false); castCleanup(); }
+    };
     castStream.getVideoTracks()[0].onended = function() { stopCast(); };
   }).catch(function(err) {
     setCtrl('Cast failed: ' + err.message, true);
-    document.getElementById('castBtn').disabled = false;
   });
 }
 
-function loadStats() {
-  api('GET', '/stats').then(function(res) {
-    if (res.ok) {
-      document.getElementById('stFrames').textContent = res.data.frames_sent != null ? res.data.frames_sent : 0;
-      document.getElementById('stNALs').textContent = res.data.nals_sent != null ? res.data.nals_sent : 0;
-      document.getElementById('stClient').textContent = res.data.client_addr || '—';
-      document.getElementById('rawStats').textContent = JSON.stringify(res.data, null, 2);
-    } else {
-      document.getElementById('stFrames').textContent = '—';
-      document.getElementById('stNALs').textContent = '—';
-      document.getElementById('stClient').textContent = '—';
-      document.getElementById('rawStats').textContent = JSON.stringify(res.data, null, 2);
-    }
-  });
-}
-
+onSourceTypeChange();
+onTargetTypeChange();
 checkServer();
 loadStats();
-setInterval(function() { checkServer(); loadStats(); }, 2000);
+loadSource();
+setInterval(function() { checkServer(); loadStats(); loadSource(); }, 2000);
 </script>
 
 </body>
