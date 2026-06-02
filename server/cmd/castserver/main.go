@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log"
+	"net"
 	"net/http"
 	"os/exec"
 	"time"
@@ -40,7 +41,7 @@ func main() {
 	}
 	mux.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.FS(staticSub))))
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/" {
+		if r.URL.Path != "/" && r.URL.Path != "/web" {
 			http.NotFound(w, r)
 			return
 		}
@@ -51,8 +52,36 @@ func main() {
 	mux.HandleFunc("/stats", ctrl.HandleStats)
 	mux.HandleFunc("/ws/cast", cast.Handler(ctrl))
 	mux.HandleFunc("/ws/web", webclient.Handler(ctrl))
-	mux.HandleFunc("/web", func(w http.ResponseWriter, r *http.Request) {
-		http.ServeFileFS(w, r, staticFS, "static/web.html")
+
+	mux.HandleFunc("/interfaces", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var ips []string
+		ifaces, err := net.Interfaces()
+		if err == nil {
+			for _, i := range ifaces {
+				addrs, err := i.Addrs()
+				if err != nil {
+					continue
+				}
+				for _, a := range addrs {
+					if ipnet, ok := a.(*net.IPNet); ok {
+						ip := ipnet.IP
+						if ip.IsLoopback() || ip.To4() == nil {
+							continue
+						}
+						ips = append(ips, ip.String())
+					}
+				}
+			}
+		}
+		if ips == nil {
+			ips = []string{}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(ips)
 	})
 
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
