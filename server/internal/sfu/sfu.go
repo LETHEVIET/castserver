@@ -108,6 +108,18 @@ func (m *Manager) OnPublishOffer(offer webrtc.SessionDescription) (webrtc.Sessio
 			return
 		}
 		m.localTrack = local
+
+		// Dynamic on-the-fly track replacement for all current subscribers!
+		for id, subPC := range m.subPCs {
+			for _, sender := range subPC.GetSenders() {
+				if sender.Track() != nil {
+					log.Printf("sfu: dynamically replacing stream track for subscriber[%s]", id)
+					if err := sender.ReplaceTrack(local); err != nil {
+						log.Printf("sfu: failed to replace stream track for subscriber[%s]: %v", id, err)
+					}
+				}
+			}
+		}
 		m.mu.Unlock()
 
 		// Read incoming RTCP packets to drain the buffer and allow interceptors (NACK, PLI) to work

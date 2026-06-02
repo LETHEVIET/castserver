@@ -1,10 +1,22 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import { Button } from 'flowbite-svelte';
 
   let pc: RTCPeerConnection | null = null;
   let wsSignaling: WebSocket | null = null;
   let streaming = false;
+  let isDark = true;
+
+  function toggleTheme() {
+    isDark = !isDark;
+    if (isDark) {
+      document.documentElement.classList.add('dark');
+      localStorage.setItem('theme', 'dark');
+    } else {
+      document.documentElement.classList.remove('dark');
+      localStorage.setItem('theme', 'light');
+    }
+  }
+
   let showOverlay = true;
   let fullscreen = false;
   let idleText = 'Connecting...';
@@ -27,6 +39,10 @@
   let overlayTimer: ReturnType<typeof setTimeout>;
   let videoEl: HTMLVideoElement;
   let wakeLock: any = null;
+
+  // Reconnection and Server Discovery states
+  let userDisconnected = false;
+  let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
 
   function showWithTimer() {
     showOverlay = true;
@@ -73,8 +89,47 @@
     else releaseWakeLock();
   }
 
+  function scheduleReconnect() {
+    if (userDisconnected) return;
+    if (reconnectTimer) return;
+    
+    idleText = 'Searching for broadcast...';
+    reconnectTimer = setTimeout(async () => {
+      reconnectTimer = undefined;
+      await attemptReconnect();
+    }, 2000);
+  }
+
+  async function attemptReconnect() {
+    if (userDisconnected) return;
+    if (pc || wsSignaling) return;
+
+    try {
+      const resp = await fetch('/stats');
+      if (resp.ok) {
+        const s = await resp.json();
+        if (s.session_active) {
+          connect();
+        } else {
+          scheduleReconnect();
+        }
+      } else {
+        scheduleReconnect();
+      }
+    } catch {
+      scheduleReconnect();
+    }
+  }
+
   async function connect() {
     if (pc) return;
+    
+    userDisconnected = false;
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = undefined;
+    }
+    
     idleText = 'Connecting...';
     errorState = false;
 
@@ -243,28 +298,15 @@
     }
   }
 
-  function waitForIceGathering(pc: RTCPeerConnection): Promise<void> {
-    return new Promise((resolve) => {
-      if (pc.iceGatheringState === 'complete') {
-        resolve();
-        return;
+  function disconnect(manual = false) {
+    if (manual) {
+      userDisconnected = true;
+      if (reconnectTimer) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = undefined;
       }
-      const timer = setTimeout(() => {
-        console.log('viewer ICE gathering timeout, proceeding');
-        resolve();
-      }, 3000);
-      const listener = () => {
-        if (pc.iceGatheringState === 'complete') {
-          clearTimeout(timer);
-          pc.removeEventListener('icegatheringstatechange', listener);
-          resolve();
-        }
-      };
-      pc.addEventListener('icegatheringstatechange', listener);
-    });
-  }
+    }
 
-  function disconnect() {
     if (statsInterval) {
       clearInterval(statsInterval);
       statsInterval = undefined;
@@ -276,9 +318,13 @@
     if (pc) { try { pc.close(); } catch {} pc = null; }
     streaming = false;
     if (videoEl) videoEl.srcObject = null;
-  }
 
+    if (!userDisconnected) {
+      scheduleReconnect();
+    }
+  }
   onMount(() => {
+    isDark = document.documentElement.classList.contains('dark');
     document.addEventListener('fullscreenchange', syncFs);
     document.addEventListener('webkitfullscreenchange', syncFs);
     document.addEventListener('visibilitychange', async () => {
@@ -290,87 +336,148 @@
   onDestroy(() => {
     document.removeEventListener('fullscreenchange', syncFs);
     document.removeEventListener('webkitfullscreenchange', syncFs);
-    disconnect();
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = undefined;
+    }
+    disconnect(true);
     releaseWakeLock();
-  });
-</script>
+  });</script>
 
-<div id="wrap" class="fixed inset-0 flex items-center justify-center bg-black">
+<div id="wrap" class="fixed inset-0 flex items-center justify-center bg-zinc-100 dark:bg-[#050506] font-sans select-none transition-minimal" class:cursor-none={!showOverlay && fullscreen}>
+  
+  <!-- Main Stream Output Video -->
   <video
     bind:this={videoEl}
     autoplay playsinline muted
-    class="max-h-full max-w-full"
+    class="w-full h-full z-0 object-contain transition-minimal"
     class:hidden={!streaming}
   ></video>
 
-  <div class="absolute inset-0 flex flex-col items-center justify-center gap-4 bg-gray-950 z-10" class:hidden={streaming}>
-    <div class="relative w-15 h-15 rounded-full bg-emerald-500/10 flex items-center justify-center">
-      <div class="absolute inset-0 rounded-full border-2 border-emerald-500 animate-ping opacity-20"></div>
-      <div class="w-3 h-3 rounded-full bg-emerald-500 shadow-[0_0_12px_#10b981]"></div>
+  <!-- Ultra-Minimalist Empty State Interface -->
+  <div class="absolute inset-0 flex flex-col items-center justify-center gap-6 bg-zinc-50 dark:bg-[#050506] z-10 transition-colors duration-150" class:hidden={streaming}>
+    <div class="relative w-12 h-12 flex items-center justify-center">
+      <!-- Minimal thin loader -->
+      <div class="w-8 h-8 rounded-full border border-zinc-200 dark:border-zinc-900 border-t-zinc-800 dark:border-t-zinc-300 animate-spin"></div>
     </div>
-    <div class="text-xs text-gray-400 font-medium text-center max-w-64 leading-relaxed">{idleText}</div>
+    
+    <div class="text-xs text-zinc-500 dark:text-zinc-400 font-mono tracking-tight text-center max-w-xs leading-relaxed">
+      {idleText}
+    </div>
+    
     {#if errorState}
-      <Button on:click={connect}>Retry</Button>
+      <button
+        on:click={connect}
+        class="mt-2 bg-zinc-950 hover:bg-zinc-800 text-white dark:bg-white dark:hover:bg-zinc-200 dark:text-black active-press text-[11px] font-mono font-medium py-2 px-5 rounded transition-minimal outline-none"
+      >
+        Retry Connection
+      </button>
     {/if}
   </div>
 
+  <!-- Live WebRTC Corner Indicator -->
   <div
-    class="absolute top-4 right-4 z-30 flex items-center gap-2 bg-black/60 backdrop-blur-xl border border-white/10 px-3 py-1.5 rounded-full text-[11px] font-medium tracking-wide text-gray-400 shadow-lg transition-opacity duration-300"
-    class:hidden={!streaming || !showOverlay}
+    class="absolute top-6 right-6 z-30 flex items-center gap-2 bg-white/80 dark:bg-[#09090b]/80 backdrop-blur-md border border-zinc-200 dark:border-zinc-900 px-3 py-1.5 rounded text-[10px] font-mono text-zinc-600 dark:text-zinc-400 shadow-lg transition-minimal pointer-events-none"
+    class:opacity-0={!streaming || !showOverlay}
+    class:translate-y-[-4px]={!streaming || !showOverlay}
   >
-    <span class="w-1.5 h-1.5 rounded-full bg-emerald-500 shadow-[0_0_8px_#10b981]"></span>
-    WebRTC Live
+    <span class="relative flex h-1.5 w-1.5">
+      <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+      <span class="relative inline-flex rounded-full h-1.5 w-1.5 bg-emerald-500 status-ring-active"></span>
+    </span>
+    LIVE
   </div>
 
+  <!-- Minimal Corner Telemetry Pane -->
   {#if streaming && showOverlay}
-  <div
-    class="absolute top-4 left-4 z-30 flex flex-col gap-1.5 bg-black/70 backdrop-blur-xl border border-white/10 p-3.5 rounded-xl text-[11px] font-medium text-gray-400 shadow-2xl transition-all duration-300"
-  >
-    <div class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1 pb-1 border-b border-white/5">
-      Receiver Telemetry
+    <div
+      class="absolute top-6 left-6 z-30 flex flex-col gap-2.5 bg-white/80 dark:bg-[#09090b]/80 backdrop-blur-md border border-zinc-200 dark:border-zinc-900 p-4 rounded text-[10px] text-zinc-600 dark:text-zinc-400 shadow-lg min-w-[200px] transition-minimal pointer-events-none fade-in-up font-mono"
+    >
+      <div class="text-[9px] font-semibold text-zinc-450 dark:text-zinc-500 uppercase tracking-wider mb-0.5 pb-1.5 border-b border-zinc-200 dark:border-zinc-900">
+        Telemetry Data
+      </div>
+      <div class="flex justify-between gap-6">
+        <span class="text-zinc-450 dark:text-zinc-500">Resolution</span>
+        <span class="text-zinc-800 dark:text-zinc-300 font-medium tabular-nums">{resolution || '—'}</span>
+      </div>
+      <div class="flex justify-between gap-6">
+        <span class="text-zinc-450 dark:text-zinc-500">Frame Rate</span>
+        <span class="text-zinc-800 dark:text-zinc-300 font-medium tabular-nums">{decodeFps} FPS</span>
+      </div>
+      <div class="flex justify-between gap-6">
+        <span class="text-zinc-450 dark:text-zinc-500">Bitrate</span>
+        <span class="text-zinc-800 dark:text-zinc-300 font-medium tabular-nums">{decodeBitrate} kbps</span>
+      </div>
+      <div class="flex justify-between gap-6">
+        <span class="text-zinc-450 dark:text-zinc-500">Latency</span>
+        <span class="text-zinc-800 dark:text-zinc-300 font-medium tabular-nums">{decodeTime} ms</span>
+      </div>
+      <div class="flex justify-between gap-6">
+        <span class="text-zinc-450 dark:text-zinc-500">Jitter Buffer</span>
+        <span class="text-zinc-800 dark:text-zinc-300 font-medium tabular-nums">{jitterBuffer} ms</span>
+      </div>
+      <div class="flex justify-between gap-6">
+        <span class="text-zinc-450 dark:text-zinc-500">Dropped Frames</span>
+        <span class="text-rose-600 dark:text-rose-500 font-medium tabular-nums">{droppedFrames}</span>
+      </div>
     </div>
-    <div class="flex justify-between gap-5">
-      <span>Resolution:</span>
-      <span class="font-mono text-gray-200 font-semibold">{resolution || '—'}</span>
-    </div>
-    <div class="flex justify-between gap-5">
-      <span>Frame Rate:</span>
-      <span class="font-mono text-indigo-400 font-semibold">{decodeFps} FPS</span>
-    </div>
-    <div class="flex justify-between gap-5">
-      <span>Incoming Bitrate:</span>
-      <span class="font-mono text-amber-400 font-semibold">{decodeBitrate} kbps</span>
-    </div>
-    <div class="flex justify-between gap-5">
-      <span>Decode Latency:</span>
-      <span class="font-mono text-violet-400 font-semibold">{decodeTime} ms</span>
-    </div>
-    <div class="flex justify-between gap-5">
-      <span>Jitter Buffer:</span>
-      <span class="font-mono text-emerald-400 font-semibold">{jitterBuffer} ms</span>
-    </div>
-    <div class="flex justify-between gap-5">
-      <span>Dropped Frames:</span>
-      <span class="font-mono text-rose-400 font-semibold">{droppedFrames}</span>
-    </div>
-  </div>
   {/if}
 
+  <!-- Beautiful Bottom Overlay Menu Bar -->
   <div
-    class="absolute bottom-6 left-1/2 -translate-x-1/2 z-30 flex items-center gap-2 bg-black/60 backdrop-blur-xl border border-white/10 px-3 py-2 rounded-full shadow-2xl transition-all duration-400"
-    class:opacity-0={!showOverlay} class:pointer-events-none={!showOverlay} class:translate-y-5={!showOverlay}
+    class="absolute bottom-8 left-1/2 -translate-x-1/2 z-30 flex items-center gap-3 bg-white/95 dark:bg-[#09090b]/90 backdrop-blur-md border border-zinc-200 dark:border-zinc-900 px-4 py-2 rounded shadow-2xl transition-minimal"
+    class:opacity-0={!showOverlay}
+    class:pointer-events-none={!showOverlay}
+    class:translate-y-2={!showOverlay}
   >
+    <!-- Disconnect Trigger -->
     <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions -->
     <span on:click={(e) => e.stopPropagation()}>
-      <Button color="red" size="xs" on:click={() => { disconnect(); idleText = 'Disconnected'; errorState = true; showOverlay = true; }}>Disconnect</Button>
+      <button
+        on:click={() => { disconnect(true); idleText = 'Disconnected'; errorState = true; showOverlay = true; }}
+        class="bg-transparent hover:bg-rose-50/50 dark:hover:bg-rose-950/20 border border-zinc-250 dark:border-zinc-850 hover:border-rose-200 dark:hover:border-rose-900/50 text-rose-600 dark:text-rose-500 text-[10px] font-mono font-medium py-1.5 px-3.5 rounded transition-minimal outline-none"
+      >
+        Disconnect
+      </button>
     </span>
-    <span class="w-px h-5 bg-white/10"></span>
+    
+    <span class="w-px h-3 bg-zinc-200 dark:bg-zinc-900"></span>
+
+    <!-- Theme Toggle -->
+    <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions -->
+    <span on:click={(e) => { e.stopPropagation(); toggleTheme(); showWithTimer(); }}>
+      <button
+        on:click={toggleTheme}
+        class="bg-zinc-50 hover:bg-zinc-100 dark:bg-zinc-900 dark:hover:bg-zinc-850 border border-zinc-200 dark:border-zinc-850 text-zinc-500 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-white text-[10px] font-mono font-medium p-1.5 rounded transition-minimal outline-none flex items-center justify-center"
+        title="Toggle Theme"
+      >
+        {#if isDark}
+          <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364-6.364l-.707.707M6.343 17.657l-.707.707m0-12.728l.707.707m12.728 12.728l.707-.707M12 8a4 4 0 100 8 4 4 0 000-8z"></path>
+          </svg>
+        {:else}
+          <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z"></path>
+          </svg>
+        {/if}
+      </button>
+    </span>
+
+    <span class="w-px h-3 bg-zinc-200 dark:bg-zinc-900"></span>
+    
+    <!-- Fullscreen Toggle -->
     <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions -->
     <span on:click={(e) => { e.stopPropagation(); toggleFullscreen(); showWithTimer(); }}>
-      <Button color="dark" size="xs" on:click={toggleFullscreen}>{fullscreen ? 'Exit Fullscreen' : 'Fullscreen'}</Button>
+      <button
+        on:click={toggleFullscreen}
+        class="bg-zinc-50 hover:bg-zinc-100 dark:bg-zinc-900 dark:hover:bg-zinc-850 border border-zinc-200 dark:border-zinc-850 text-zinc-700 dark:text-zinc-300 text-[10px] font-mono font-medium py-1.5 px-3.5 rounded transition-minimal outline-none"
+      >
+        {fullscreen ? 'Exit Full' : 'Fullscreen'}
+      </button>
     </span>
   </div>
 
+  <!-- Transparent Fullscreen Interaction Mask to toggle controls overlay visibility -->
   <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions -->
   <div class="absolute inset-0 z-5" on:click={toggleOverlay}></div>
 </div>

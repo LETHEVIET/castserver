@@ -1,6 +1,5 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import { Card, Button, Select, Badge } from 'flowbite-svelte';
   import { makeQR } from './lib/qrcode';
   import type { Preset, Stats } from './lib/api';
 
@@ -8,6 +7,19 @@
   let selectedPreset = '';
   let fps = '30';
   let casting = false;
+  let isDark = true;
+
+  function toggleTheme() {
+    isDark = !isDark;
+    if (isDark) {
+      document.documentElement.classList.add('dark');
+      localStorage.setItem('theme', 'dark');
+    } else {
+      document.documentElement.classList.remove('dark');
+      localStorage.setItem('theme', 'light');
+    }
+  }
+
   let ctrlMsg = '';
   let ctrlErr = false;
 
@@ -50,10 +62,18 @@
   const codecItems = [
     { value: 'auto', name: 'Auto (Browser Default)' },
     { value: 'h264', name: 'Force H.264 (NVENC / Software)' },
-    { value: 'vp9', name: 'Force VP9 (Highly Optimized Software/HW)' },
-    { value: 'vp8', name: 'Force VP8 (Highly Optimized Software/HW)' },
+    { value: 'vp9', name: 'Force VP9 (Highly Optimized)' },
+    { value: 'vp8', name: 'Force VP8 (Highly Optimized)' },
   ];
   let selectedCodec = 'auto';
+
+  // Svelte layout control states
+  let copiedIp = '';
+  let activeQrIp = '';
+
+  function toggleQr(ip: string) {
+    activeQrIp = activeQrIp === ip ? '' : ip;
+  }
 
   function qrAction(node: HTMLElement, url: string) {
     node.appendChild(makeQR(url, 4));
@@ -63,20 +83,13 @@
     };
   }
 
-  function qrMini(node: HTMLElement, url: string) {
-    node.appendChild(makeQR(url, 2));
-    return {
-      update(u: string) { node.innerHTML = ''; node.appendChild(makeQR(u, 2)); },
-      destroy() { node.innerHTML = ''; },
-    };
-  }
-
   function setCtrl(msg: string, err: boolean) {
     ctrlMsg = msg;
     ctrlErr = err;
   }
 
-  function castCleanup() {
+  // Recycles browser media resources without telling the server to terminate subscribers
+  function localCleanup() {
     if (statsInterval) {
       clearInterval(statsInterval);
       statsInterval = undefined;
@@ -93,6 +106,10 @@
       castStream.getTracks().forEach(t => t.stop());
       castStream = null;
     }
+  }
+
+  function castCleanup() {
+    localCleanup();
     if (castPreview) {
       castPreview.style.display = 'none';
       castPreview.srcObject = null;
@@ -110,7 +127,13 @@
     const p = presets.find(p => p.name === selectedPreset) || presets[0];
     const fpsVal = parseInt(fps, 10) || p?.fps || 30;
 
-    setCtrl('Requesting screen capture...', false);
+    if (casting) {
+      setCtrl('Switching capture source...', false);
+      localCleanup();
+    } else {
+      setCtrl('Requesting screen capture...', false);
+    }
+
     try {
       const s = await navigator.mediaDevices.getDisplayMedia({
         video: {
@@ -223,7 +246,7 @@
                   const params = sender.getParameters();
                   if (!params.encodings) params.encodings = [{}];
                   params.encodings[0].maxBitrate = p.bitrate * 1000;
-                  params.degradationPreference = 'maintain-resolution'; // Prioritize resolution crispness over FPS if bandwidth fluctuates
+                  params.degradationPreference = 'maintain-resolution';
                   sender.setParameters(params).catch(() => {});
                   console.log('Applied encoder parameters: maxBitrate =', p.bitrate * 1000, 'degradationPreference = maintain-resolution');
                 }
@@ -290,7 +313,7 @@
         const duration = activeOutbound.totalEncodeTime || 0;
 
         if (lastBytesSent && lastTime) {
-          const dt = (activeOutbound.timestamp - lastTime) / 1000; // seconds
+          const dt = (activeOutbound.timestamp - lastTime) / 1000;
           if (dt > 0) {
             encodeBitrate = Math.round(((bytes - lastBytesSent) * 8) / 1000 / dt);
             encodeFps = Math.round((frames - lastFramesEncoded) / dt);
@@ -318,27 +341,6 @@
     } catch (e) {
       console.error('Error getting stats:', e);
     }
-  }
-
-  function waitForIceGathering(pc: RTCPeerConnection): Promise<void> {
-    return new Promise((resolve) => {
-      if (pc.iceGatheringState === 'complete') {
-        resolve();
-        return;
-      }
-      const timer = setTimeout(() => {
-        console.log('publisher ICE gathering timeout, proceeding with current candidates');
-        resolve();
-      }, 3000);
-      const listener = () => {
-        if (pc.iceGatheringState === 'complete') {
-          clearTimeout(timer);
-          pc.removeEventListener('icegatheringstatechange', listener);
-          resolve();
-        }
-      };
-      pc.addEventListener('icegatheringstatechange', listener);
-    });
   }
 
   function doStop() {
@@ -370,9 +372,11 @@
     return proto + '//' + ip + (port ? ':' + port : '') + '/web';
   }
 
-  async function copyUrl(url: string) {
+  async function copyUrl(url: string, ip: string) {
     try {
       await navigator.clipboard.writeText(url);
+      copiedIp = ip;
+      setTimeout(() => { copiedIp = ''; }, 2000);
     } catch { }
   }
 
@@ -381,7 +385,6 @@
       const list: Preset[] = await (await fetch('/presets')).json();
       presets = list;
       if (list.length > 0) {
-        // Default to the "Native" preset for maximum quality
         const nativePreset = list.find(p => p.name === 'Native');
         selectedPreset = nativePreset ? nativePreset.name : list[0].name;
       }
@@ -395,6 +398,7 @@
   }
 
   onMount(() => {
+    isDark = document.documentElement.classList.contains('dark');
     checkServer();
     loadPresets();
     loadStats();
@@ -404,192 +408,326 @@
       loadStats();
     }, 2000);
   });
-
   onDestroy(() => {
     if (pollInterval) clearInterval(pollInterval);
     castCleanup();
   });
 </script>
 
-<div class="min-h-screen bg-gray-950 text-gray-200 p-4 md:p-6">
-  <div class="mx-auto max-w-5xl">
-    <header class="flex items-center justify-between pb-4 mb-6 border-b border-gray-800">
-      <h1 class="text-xl font-semibold tracking-tight">castserver</h1>
-      <div class="flex items-center gap-2">
-        <Badge color={online ? 'green' : 'red'} rounded>
-          {online ? 'Online' : 'Checking...'}
-        </Badge>
-        <Badge color="blue" rounded>WebRTC</Badge>
+<div class="min-h-screen bg-white dark:bg-[#09090b] text-zinc-800 dark:text-[#e4e4e7] px-4 py-8 md:py-16 select-none font-sans fade-in-up transition-colors duration-150">
+  <div class="mx-auto max-w-4xl">
+    
+    <!-- Ultra-Minimalist Header -->
+    <header class="flex items-center justify-between pb-6 mb-10 border-b border-zinc-200 dark:border-zinc-900">
+      <div class="flex items-center gap-3">
+        <svg class="w-5 h-5 text-zinc-900 dark:text-zinc-100" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z"></path>
+        </svg>
+        <span class="text-base font-semibold tracking-tight text-zinc-900 dark:text-white font-mono">castserver</span>
+        <span class="inline-flex items-center rounded-md bg-zinc-100 dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 px-2 py-0.5 text-[10px] font-medium text-zinc-600 dark:text-zinc-400 font-mono">
+          v1.0 SFU
+        </span>
+      </div>
+      <div class="flex items-center gap-3 shrink-0">
+        <!-- Theme Toggle Button -->
+        <button
+          on:click={toggleTheme}
+          class="flex items-center justify-center p-1.5 rounded-md border border-zinc-250 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-950 text-zinc-500 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-white transition-minimal outline-none"
+          title="Toggle Theme"
+        >
+          {#if isDark}
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364-6.364l-.707.707M6.343 17.657l-.707.707m0-12.728l.707.707m12.728 12.728l.707-.707M12 8a4 4 0 100 8 4 4 0 000-8z"></path>
+            </svg>
+          {:else}
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z"></path>
+            </svg>
+          {/if}
+        </button>
+
+        <div class="flex items-center gap-2 px-3 py-1 rounded-full bg-zinc-50 dark:bg-zinc-900/40 border border-zinc-200 dark:border-zinc-850">
+          <span class="relative flex h-2 w-2">
+            {#if online}
+              <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+              <span class="relative inline-flex rounded-full h-2 w-2 bg-emerald-500 status-ring-active"></span>
+            {:else}
+              <span class="relative inline-flex rounded-full h-2 w-2 bg-rose-500"></span>
+            {/if}
+          </span>
+          <span class="text-[11px] font-mono text-zinc-500 dark:text-zinc-400 uppercase tracking-wider">{online ? 'online' : 'offline'}</span>
+        </div>
       </div>
     </header>
 
-    <div class="grid grid-cols-[1.2fr_1fr] gap-6 max-md:grid-cols-1">
-      <div>
-        <Card size="none">
-          <h2 class="text-xs font-semibold uppercase tracking-wider text-gray-400 mb-5 pb-2 border-b border-gray-700">
-            Cast Configuration
-          </h2>
-
-          <div class="mb-4">
-            <Select items={presetItems} bind:value={selectedPreset} disabled={casting} placeholder="Select preset" size="md" />
+    <!-- Content Grid -->
+    <div class="grid grid-cols-1 md:grid-cols-[1.1fr_0.9fr] gap-10">
+      
+      <!-- Left Column: Controls & Preview -->
+      <div class="space-y-8">
+        
+        <!-- Stream Controller Card -->
+        <div class="bg-zinc-50/50 dark:bg-zinc-900/20 border border-zinc-200 dark:border-zinc-900 rounded-lg p-6 transition-minimal">
+          <div class="flex items-center justify-between pb-4 mb-5 border-b border-zinc-200 dark:border-zinc-900">
+            <h2 class="text-xs font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400 font-mono">
+              Broadcast Settings
+            </h2>
+            {#if casting}
+              <span class="inline-flex items-center rounded bg-emerald-500/10 px-2 py-0.5 text-[10px] font-mono text-emerald-600 dark:text-emerald-400 border border-emerald-500/20">
+                LIVE
+              </span>
+            {/if}
           </div>
 
-          <div class="mb-4">
-            <Select items={fpsItems} bind:value={fps} disabled={casting} placeholder="FPS" size="md" />
+          <div class="space-y-5">
+            
+            <!-- Preset Selector -->
+            <div>
+              <label for="preset-select" class="block text-[10px] font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider mb-2 font-mono">Preset Configuration</label>
+              <div class="relative">
+                <select
+                  id="preset-select"
+                  bind:value={selectedPreset}
+                  disabled={casting}
+                  class="w-full select-minimal bg-zinc-50 hover:bg-zinc-100/50 dark:bg-zinc-950/60 dark:hover:bg-zinc-900/60 border border-zinc-250 dark:border-zinc-850 hover:border-zinc-350 dark:hover:border-zinc-800 disabled:opacity-50 text-zinc-800 dark:text-zinc-200 font-mono text-xs rounded-md px-3.5 py-2.5 outline-none transition-minimal focus:border-zinc-400 dark:focus:border-zinc-500 focus:ring-1 focus:ring-zinc-400 dark:focus:ring-zinc-500"
+                >
+                  {#each presets as preset}
+                    <option value={preset.name} class="bg-white dark:bg-zinc-950">{preset.name} ({preset.width > 0 ? `${preset.width}x${preset.height}` : 'Native'})</option>
+                  {/each}
+                </select>
+              </div>
+            </div>
+
+            <!-- Double Grid: FPS & Codec -->
+            <div class="grid grid-cols-2 gap-4">
+              <div>
+                <label for="fps-select" class="block text-[10px] font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider mb-2 font-mono">Frame Rate</label>
+                <div class="relative">
+                  <select
+                    id="fps-select"
+                    bind:value={fps}
+                    disabled={casting}
+                    class="w-full select-minimal bg-zinc-50 hover:bg-zinc-100/50 dark:bg-zinc-950/60 dark:hover:bg-zinc-900/60 border border-zinc-250 dark:border-zinc-850 hover:border-zinc-350 dark:hover:border-zinc-800 disabled:opacity-50 text-zinc-800 dark:text-zinc-200 font-mono text-xs rounded-md px-3.5 py-2.5 outline-none transition-minimal focus:border-zinc-400 dark:focus:border-zinc-500 focus:ring-1 focus:ring-zinc-400 dark:focus:ring-zinc-500"
+                  >
+                    {#each fpsItems as item}
+                      <option value={item.value} class="bg-white dark:bg-zinc-950">{item.name} FPS</option>
+                    {/each}
+                  </select>
+                </div>
+              </div>
+
+              <div>
+                <label for="codec-select" class="block text-[10px] font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider mb-2 font-mono">Video Codec</label>
+                <div class="relative">
+                  <select
+                    id="codec-select"
+                    bind:value={selectedCodec}
+                    disabled={casting}
+                    class="w-full select-minimal bg-zinc-50 hover:bg-zinc-100/50 dark:bg-zinc-950/60 dark:hover:bg-zinc-900/60 border border-zinc-250 dark:border-zinc-850 hover:border-zinc-350 dark:hover:border-zinc-800 disabled:opacity-50 text-zinc-800 dark:text-zinc-200 font-mono text-xs rounded-md px-3.5 py-2.5 outline-none transition-minimal focus:border-zinc-400 dark:focus:border-zinc-500 focus:ring-1 focus:ring-zinc-400 dark:focus:ring-zinc-500"
+                  >
+                    {#each codecItems as item}
+                      <option value={item.value} class="bg-white dark:bg-zinc-950">{item.name}</option>
+                    {/each}
+                  </select>
+                </div>
+              </div>
+            </div>
+
+            <!-- Cast Action Buttons -->
+            <div class="flex items-center gap-3 pt-3">
+              <button
+                on:click={doStart}
+                class="flex-1 bg-zinc-950 hover:bg-zinc-800 text-white dark:bg-white dark:hover:bg-zinc-200 dark:text-black active-press transition-minimal font-medium text-xs py-2.5 px-4 rounded-md shadow-sm outline-none flex items-center justify-center gap-2"
+              >
+                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 15l-2 5L9 9l11 4-5 2zm0 0l5 5M7.188 2.239l.777 2.897M5.136 7.965l-2.898-.777M13.95 4.05l-2.122 2.122m-5.657 5.656l-2.12 2.122"></path>
+                </svg>
+                {casting ? 'Switch Screen Source' : 'Share Screen'}
+              </button>
+              
+              <button
+                on:click={doStop}
+                disabled={!casting}
+                class="bg-transparent border border-zinc-200 hover:border-rose-200 dark:border-zinc-850 dark:hover:border-rose-900/50 hover:bg-rose-50/50 dark:hover:bg-rose-950/20 disabled:hover:bg-transparent disabled:border-zinc-150 dark:disabled:border-zinc-900 disabled:text-zinc-350 dark:disabled:text-zinc-650 disabled:cursor-not-allowed text-rose-600 dark:text-rose-500 active-press font-medium text-xs py-2.5 px-5 rounded-md transition-minimal outline-none"
+              >
+                Stop
+              </button>
+            </div>
+
+            <!-- Feedback -->
+            <div class="flex items-center gap-2 pt-2 border-t border-zinc-200 dark:border-zinc-900/50 text-[10px] font-mono">
+              <span class="w-1.5 h-1.5 rounded-full {casting ? 'bg-emerald-500 status-ring-active' : ctrlErr ? 'bg-rose-500' : 'bg-zinc-400 dark:bg-zinc-600'}"></span>
+              <p class="text-zinc-500 dark:text-zinc-400 truncate" class:text-rose-500={ctrlErr}>
+                {ctrlMsg || (casting ? 'Broadcasting live stream output' : 'Ready to begin')}
+              </p>
+            </div>
+
           </div>
+        </div>
 
-          <div class="mb-4">
-            <Select items={codecItems} bind:value={selectedCodec} disabled={casting} placeholder="Select Codec" size="md" />
+        <!-- Video Stream Preview Pane -->
+        <div class="relative overflow-hidden rounded-lg bg-black border border-zinc-200 dark:border-zinc-900 transition-minimal" style="display: {casting ? 'block' : 'none'}">
+          <video
+            bind:this={castPreview}
+            autoplay muted playsinline
+            class="w-full aspect-video rounded-lg bg-black"
+          ></video>
+          <div class="absolute top-3 left-3 bg-black/80 backdrop-blur-md border border-zinc-850 px-2 py-0.5 rounded text-[9px] font-mono tracking-wide text-zinc-400">
+            LOCAL MONITOR FEED
           </div>
+        </div>
 
-          <div class="flex gap-3 mt-5">
-            <Button on:click={doStart} disabled={casting}>Share Screen</Button>
-            <Button color="red" on:click={doStop} disabled={!casting}>Stop</Button>
-          </div>
-
-          <p class="text-xs mt-4" class:text-green-400={!ctrlErr} class:text-red-400={ctrlErr}>
-            {ctrlMsg || ''}
-          </p>
-        </Card>
-
-        <video
-          bind:this={castPreview}
-          autoplay muted playsinline
-          class="w-full rounded-lg border border-gray-700 mt-4 hidden bg-black"
-        ></video>
       </div>
 
-      <div>
-        <Card size="none">
-          <h2 class="text-xs font-semibold uppercase tracking-wider text-gray-400 mb-5 pb-2 border-b border-gray-700">
-            Quick Share
+      <!-- Right Column: Share & HUD -->
+      <div class="space-y-8">
+        
+        <!-- Distribution Share Hub -->
+        <div class="bg-zinc-50/50 dark:bg-zinc-900/20 border border-zinc-200 dark:border-zinc-900 rounded-lg p-6 transition-minimal">
+          <h2 class="text-xs font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400 pb-4 mb-4 border-b border-zinc-200 dark:border-zinc-900 font-mono">
+            Stream Distribution
           </h2>
-          <div class="flex flex-col gap-3">
+          
+          <div class="space-y-3">
             {#if networkIps.length === 0}
-              <p class="text-xs text-gray-500 text-center py-4">No network interfaces found.</p>
-            {:else if networkIps.length === 1}
-              {@const url = viewerUrl(networkIps[0])}
-              <div class="flex flex-col items-center gap-4 p-5 bg-gray-900/50 rounded-lg border border-gray-800">
-                <div use:qrAction={url} class="bg-white p-2 rounded-lg shadow-lg"></div>
-                <div class="flex items-center w-full bg-gray-950 border border-gray-800 rounded-lg overflow-hidden">
-                  <span class="flex-1 font-mono text-xs p-2.5 truncate text-gray-400">{url}</span>
-                  <button
-                    on:click={() => copyUrl(url)}
-                    class="bg-gray-800 hover:bg-gray-700 border-l border-gray-700 px-3.5 py-2.5 text-xs font-semibold text-gray-200 transition-colors"
-                  >Copy</button>
-                </div>
+              <div class="flex flex-col items-center justify-center py-6 text-zinc-450 dark:text-zinc-550 gap-2">
+                <svg class="w-5 h-5 animate-spin text-zinc-450 dark:text-zinc-500" fill="none" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                  <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                  <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                </svg>
+                <p class="text-[10px] font-mono">Detecting local network interfaces...</p>
               </div>
             {:else}
               {#each networkIps as ip}
                 {@const url = viewerUrl(ip)}
-                <div class="flex items-center gap-3 p-3 bg-gray-900/50 rounded-lg border border-gray-800">
-                  <div use:qrMini={url} class="bg-white p-1 rounded shrink-0"></div>
-                  <div class="flex-1 min-w-0">
-                    <div class="font-mono text-xs text-gray-300 truncate">{url}</div>
+                <div class="group flex flex-col gap-2 p-3 bg-zinc-50 dark:bg-zinc-950/40 border border-zinc-150 dark:border-zinc-900 hover:border-zinc-250 dark:hover:border-zinc-850 rounded-md transition-minimal">
+                  <div class="flex items-center justify-between gap-3">
+                    <span class="font-mono text-xs text-zinc-500 dark:text-zinc-400 group-hover:text-zinc-800 group-hover:dark:text-zinc-300 truncate tracking-tight">{url}</span>
+                    <div class="flex items-center gap-1.5 shrink-0">
+                      <!-- QR Toggle -->
+                      <button
+                        on:click={() => toggleQr(ip)}
+                        class="text-[10px] font-mono font-medium text-zinc-500 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-white border border-zinc-200 dark:border-zinc-850 hover:border-zinc-300 dark:hover:border-zinc-700 px-2 py-1 rounded bg-zinc-100/50 dark:bg-zinc-900/20 hover:bg-zinc-100 dark:hover:bg-zinc-900/60 transition-minimal outline-none"
+                      >
+                        {activeQrIp === ip ? 'Hide' : 'QR'}
+                      </button>
+                      
+                      <!-- Copy to Clipboard -->
+                      <button
+                        on:click={() => copyUrl(url, ip)}
+                        class="text-[10px] font-mono font-medium transition-minimal px-2.5 py-1 rounded border min-w-16 text-center outline-none {copiedIp === ip ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-600 dark:text-emerald-400' : 'bg-zinc-100 dark:bg-zinc-900 border-zinc-200 dark:border-zinc-850 hover:bg-zinc-200 hover:dark:bg-zinc-850 hover:border-zinc-300 hover:dark:border-zinc-700 text-zinc-700 dark:text-zinc-200'}"
+                      >
+                        {copiedIp === ip ? 'Copied' : 'Copy'}
+                      </button>
+                    </div>
                   </div>
-                  <button
-                    on:click={() => copyUrl(url)}
-                    class="shrink-0 bg-gray-800 hover:bg-gray-700 px-3 py-1.5 rounded text-xs font-semibold text-gray-200 transition-colors"
-                  >Copy</button>
+
+                  <!-- QR Code Slider Drawer -->
+                  {#if activeQrIp === ip}
+                    <div class="flex flex-col items-center gap-2 pt-3 border-t border-zinc-150 dark:border-zinc-900 mt-1 fade-in-up">
+                      <div use:qrAction={url} class="bg-white p-2.5 rounded shadow-lg scale-[0.85] dark:filter dark:invert border border-zinc-200 dark:border-zinc-800"></div>
+                      <p class="text-[9px] font-mono tracking-wider uppercase text-zinc-400 dark:text-zinc-500">Scan to watch live</p>
+                    </div>
+                  {/if}
                 </div>
               {/each}
             {/if}
           </div>
-        </Card>
+        </div>
 
-        <Card size="none">
-          <h2 class="text-xs font-semibold uppercase tracking-wider text-gray-400 mb-5 pb-2 border-b border-gray-700">
-            Session Stats
+        <!-- Sleek Typographic Diagnostics HUD -->
+        <div class="bg-zinc-50/50 dark:bg-zinc-900/20 border border-zinc-200 dark:border-zinc-900 rounded-lg p-6 transition-minimal">
+          <h2 class="text-xs font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400 pb-4 mb-5 border-b border-zinc-200 dark:border-zinc-900 font-mono">
+            Diagnostics HUD
           </h2>
-          <table class="w-full text-sm">
-            <thead>
-              <tr class="text-gray-400 font-medium border-b border-gray-800">
-                <th class="py-2.5 text-left">Metric</th>
-                <th class="py-2.5 text-right">Value</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr class="border-b border-gray-800/50">
-                <td class="py-2.5">Frames Published</td>
-                <td class="py-2.5 text-right font-mono font-semibold">{framesPublished}</td>
-              </tr>
-              <tr class="border-b border-gray-800/50">
-                <td class="py-2.5">Subscribers</td>
-                <td class="py-2.5 text-right font-mono font-semibold">{webSubscribers}</td>
-              </tr>
-              <tr>
-                <td class="py-2.5">Session State</td>
-                <td
-                  class="py-2.5 text-right font-mono font-semibold"
-                  style="color: {sessionActive ? '#10b981' : '#6b7280'}"
-                >{sessionActive ? 'active' : 'idle'}</td>
-              </tr>
-            </tbody>
-          </table>
-        </Card>
+          
+          <div class="space-y-4">
+            <!-- Bitrate -->
+            <div class="flex justify-between items-center py-1.5 border-b border-zinc-150 dark:border-zinc-900/50">
+              <span class="text-[10px] font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider font-mono">Actual Bitrate</span>
+              <div class="flex items-baseline gap-1">
+                <span class="font-mono text-lg font-semibold text-zinc-850 dark:text-white tabular-nums">
+                  {casting ? encodeBitrate : '—'}
+                </span>
+                {#if casting}
+                  <span class="text-[9px] font-mono text-zinc-450 dark:text-zinc-500">kbps</span>
+                {/if}
+              </div>
+            </div>
 
-        {#if casting}
-        <Card size="none" class="mt-4">
-          <h2 class="text-xs font-semibold uppercase tracking-wider text-gray-400 mb-5 pb-2 border-b border-gray-700 flex justify-between items-center">
-            <span>WebRTC Telemetry</span>
-            <Badge color="blue" class="text-[10px]">Active</Badge>
-          </h2>
-          <table class="w-full text-sm">
-            <thead>
-              <tr class="text-gray-400 font-medium border-b border-gray-800">
-                <th class="py-2.5 text-left">Pipeline Stage</th>
-                <th class="py-2.5 text-right">Value</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr class="border-b border-gray-800/50">
-                <td class="py-2.5 flex items-center gap-1.5">
-                  <span class="w-1.5 h-1.5 rounded-full bg-blue-500"></span>
-                  Encoder Codec
-                </td>
-                <td class="py-2.5 text-right font-mono font-semibold text-gray-300">{encoderInfo || 'H.264'}</td>
-              </tr>
-              <tr class="border-b border-gray-800/50">
-                <td class="py-2.5 flex items-center gap-1.5">
-                  <span class="w-1.5 h-1.5 rounded-full bg-violet-500"></span>
-                  Encode Latency
-                </td>
-                <td class="py-2.5 text-right font-mono font-semibold text-violet-400">{encodeTime} ms</td>
-              </tr>
-              <tr class="border-b border-gray-800/50">
-                <td class="py-2.5 flex items-center gap-1.5">
-                  <span class="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
-                  Network Latency (RTT)
-                </td>
-                <td class="py-2.5 text-right font-mono font-semibold text-emerald-400">{rtt} ms</td>
-              </tr>
-              <tr class="border-b border-gray-800/50">
-                <td class="py-2.5 flex items-center gap-1.5">
-                  <span class="w-1.5 h-1.5 rounded-full bg-amber-500"></span>
-                  Actual Bitrate
-                </td>
-                <td class="py-2.5 text-right font-mono font-semibold text-amber-400">{encodeBitrate} kbps</td>
-              </tr>
-              <tr class="border-b border-gray-800/50">
-                <td class="py-2.5 flex items-center gap-1.5">
-                  <span class="w-1.5 h-1.5 rounded-full bg-indigo-500"></span>
-                  Frame Rate
-                </td>
-                <td class="py-2.5 text-right font-mono font-semibold text-indigo-400">{encodeFps} FPS</td>
-              </tr>
-              <tr>
-                <td class="py-2.5 flex items-center gap-1.5">
-                  <span class="w-1.5 h-1.5 rounded-full bg-rose-500"></span>
-                  Quality Limiter
-                </td>
-                <td class="py-2.5 text-right font-mono font-semibold" class:text-green-400={qualityLimitation === 'none'} class:text-rose-400={qualityLimitation !== 'none'}>
+            <!-- Frame Rate -->
+            <div class="flex justify-between items-center py-1.5 border-b border-zinc-150 dark:border-zinc-900/50">
+              <span class="text-[10px] font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider font-mono">Encode Frame Rate</span>
+              <div class="flex items-baseline gap-1">
+                <span class="font-mono text-lg font-semibold text-zinc-850 dark:text-white tabular-nums">
+                  {casting ? encodeFps : '—'}
+                </span>
+                {#if casting}
+                  <span class="text-[9px] font-mono text-zinc-450 dark:text-zinc-500">FPS</span>
+                {/if}
+              </div>
+            </div>
+
+            <!-- Network Latency RTT -->
+            <div class="flex justify-between items-center py-1.5 border-b border-zinc-150 dark:border-zinc-900/50">
+              <span class="text-[10px] font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider font-mono">Network Latency</span>
+              <div class="flex items-baseline gap-1">
+                <span class="font-mono text-lg font-semibold text-zinc-850 dark:text-white tabular-nums">
+                  {casting ? rtt : '—'}
+                </span>
+                {#if casting}
+                  <span class="text-[9px] font-mono text-zinc-455 dark:text-zinc-500">ms RTT</span>
+                {/if}
+              </div>
+            </div>
+
+            <!-- Encode Duration -->
+            <div class="flex justify-between items-center py-1.5 border-b border-zinc-150 dark:border-zinc-900/50">
+              <span class="text-[10px] font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider font-mono">Encode Latency</span>
+              <div class="flex items-baseline gap-1">
+                <span class="font-mono text-lg font-semibold text-zinc-850 dark:text-white tabular-nums">
+                  {casting ? encodeTime : '—'}
+                </span>
+                {#if casting}
+                  <span class="text-[9px] font-mono text-zinc-455 dark:text-zinc-500">ms</span>
+                {/if}
+              </div>
+            </div>
+
+            <!-- Subscribers -->
+            <div class="flex justify-between items-center py-1.5 border-b border-zinc-150 dark:border-zinc-900/50">
+              <span class="text-[10px] font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider font-mono">Subscribers</span>
+              <div class="flex items-baseline gap-1">
+                <span class="font-mono text-lg font-semibold text-zinc-850 dark:text-white tabular-nums">{webSubscribers}</span>
+                <span class="text-[9px] font-mono text-zinc-455 dark:text-zinc-500">viewers</span>
+              </div>
+            </div>
+
+            <!-- Total Frames Published -->
+            <div class="flex justify-between items-center py-1.5">
+              <span class="text-[10px] font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider font-mono">Total Frames</span>
+              <div class="flex items-baseline">
+                <span class="font-mono text-lg font-semibold text-zinc-850 dark:text-white truncate max-w-[150px] tabular-nums">{framesPublished}</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- WebRTC Advanced Codec Info (Conditional Footer) -->
+          {#if casting}
+            <div class="mt-6 pt-4 border-t border-zinc-200 dark:border-zinc-900 flex items-center justify-between text-[10px] font-mono text-zinc-400 dark:text-zinc-500">
+              <span class="flex items-center gap-1.5">
+                <span class="w-1.5 h-1.5 rounded-full bg-zinc-300 dark:bg-zinc-700"></span>
+                Encoder: <span class="text-zinc-700 dark:text-zinc-400">{encoderInfo || 'H.264'}</span>
+              </span>
+              <span class="flex items-center gap-1.5">
+                Limiter: 
+                <span class="font-semibold uppercase tracking-wider {qualityLimitation === 'none' ? 'text-zinc-450 dark:text-zinc-555' : 'text-amber-600 dark:text-amber-500 status-ring-warning'}">
                   {qualityLimitation}
-                </td>
-              </tr>
-            </tbody>
-          </table>
-        </Card>
-        {/if}
+                </span>
+              </span>
+            </div>
+          {/if}
+        </div>
       </div>
     </div>
   </div>
