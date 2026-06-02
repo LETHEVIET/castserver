@@ -4,10 +4,6 @@ export interface Preset {
   height: number;
   fps: number;
   bitrate: number;
-  jpeg_quality: number;
-  scaler: string;
-  chunk_ms: number;
-  hardware_accel: boolean;
 }
 
 export interface Stats {

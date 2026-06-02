@@ -9,12 +9,10 @@ import (
 	"log"
 	"net"
 	"net/http"
-	"os/exec"
 	"time"
 
-	"castserver/internal/cast"
 	"castserver/internal/control"
-	"castserver/internal/webclient"
+	"castserver/internal/sfu"
 )
 
 //go:embed static
@@ -23,10 +21,6 @@ var staticFS embed.FS
 func main() {
 	listenAddr := flag.String("listen", ":1108", "HTTP listen address")
 	flag.Parse()
-
-	if _, err := exec.LookPath("ffmpeg"); err != nil {
-		log.Fatalf("ffmpeg not found in PATH: %v", err)
-	}
 
 	log.Printf("castserver starting...")
 	log.Printf("  HTTP: %s", *listenAddr)
@@ -50,8 +44,11 @@ func main() {
 
 	mux.HandleFunc("/presets", ctrl.HandlePresets)
 	mux.HandleFunc("/stats", ctrl.HandleStats)
-	mux.HandleFunc("/ws/cast", cast.Handler(ctrl))
-	mux.HandleFunc("/ws/web", webclient.Handler(ctrl))
+
+	mgr := ctrl.SFU()
+	mux.HandleFunc("/webrtc/publish", mgr.HandlePublish)
+	mux.HandleFunc("/webrtc/subscribe", mgr.HandleSubscribe)
+	mux.HandleFunc("/webrtc/stop", sfu.HandleStop(mgr))
 
 	mux.HandleFunc("/interfaces", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -90,29 +87,8 @@ func main() {
 	})
 
 	mux.HandleFunc("/stats/latency", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(ctrl.Latency().Stats())
-	})
-
-	mux.HandleFunc("/stats/telemetry/toggle", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		var req struct {
-			Enabled bool `json:"enabled"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		ctrl.Latency().SetEnabled(req.Enabled)
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok", "enabled": ctrl.Latency().IsEnabled()})
+		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 	})
 
 	fmt.Printf("Ready. Admin UI: http://localhost%s/  |  Viewer: /web\n", *listenAddr)
