@@ -33,8 +33,14 @@ func (m *Manager) HandlePublish(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("sfu: publisher ws connected")
 
+	mode := r.URL.Query().Get("mode")
+	if mode == "" {
+		mode = "realtime"
+	}
+
 	m.mu.Lock()
 	m.closePubLocked()
+	m.streamMode = mode
 
 	pc, err := m.api.NewPeerConnection(webrtc.Configuration{})
 	if err != nil {
@@ -81,7 +87,7 @@ func (m *Manager) HandlePublish(w http.ResponseWriter, r *http.Request) {
 
 	pc.OnTrack(func(remote *webrtc.TrackRemote, receiver *webrtc.RTPReceiver) {
 		codec := remote.Codec()
-		log.Printf("sfu: publisher track: %s codec=%s", remote.ID(), codec.MimeType)
+		log.Printf("sfu: publisher track: %s codec=%s kind=%s", remote.ID(), codec.MimeType, remote.Kind().String())
 
 		m.mu.Lock()
 		m.rtpCodec = codec.RTPCodecCapability
@@ -91,15 +97,20 @@ func (m *Manager) HandlePublish(w http.ResponseWriter, r *http.Request) {
 			log.Printf("sfu: create local track: %v", err)
 			return
 		}
-		m.localTrack = local
+
+		if remote.Kind() == webrtc.RTPCodecTypeVideo {
+			m.localVideoTrack = local
+		} else if remote.Kind() == webrtc.RTPCodecTypeAudio {
+			m.localAudioTrack = local
+		}
 
 		// Dynamic on-the-fly track replacement for all current subscribers!
 		for id, subPC := range m.subPCs {
 			for _, sender := range subPC.GetSenders() {
-				if sender.Track() != nil {
-					log.Printf("sfu: dynamically replacing stream track for subscriber[%s]", id)
+				if sender.Track() != nil && sender.Track().Kind() == remote.Kind() {
+					log.Printf("sfu: dynamically replacing %s track for subscriber[%s]", remote.Kind().String(), id)
 					if err := sender.ReplaceTrack(local); err != nil {
-						log.Printf("sfu: failed to replace stream track for subscriber[%s]: %v", id, err)
+						log.Printf("sfu: failed to replace %s track for subscriber[%s]: %v", remote.Kind().String(), id, err)
 					}
 				}
 			}
@@ -219,7 +230,7 @@ func (m *Manager) HandleSubscribe(w http.ResponseWriter, r *http.Request) {
 	log.Printf("sfu: subscriber[%s] ws connected", id)
 
 	m.mu.Lock()
-	if !m.pubActive || m.localTrack == nil {
+	if !m.pubActive || (m.localVideoTrack == nil && m.localAudioTrack == nil) {
 		m.mu.Unlock()
 		log.Printf("sfu: subscribe[%s] rejected: no active stream", id)
 		msg := SignalingMessage{Type: "error", SDP: "no active stream"}
@@ -235,11 +246,51 @@ func (m *Manager) HandleSubscribe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sender, err := pc.AddTrack(m.localTrack)
-	if err != nil {
+	var addedTrack bool
+	if m.localVideoTrack != nil {
+		sender, err := pc.AddTrack(m.localVideoTrack)
+		if err != nil {
+			pc.Close()
+			m.mu.Unlock()
+			log.Printf("sfu: subscriber[%s] add video track: %v", id, err)
+			return
+		}
+		addedTrack = true
+		// Drain RTCP from subscriber for video
+		go func() {
+			buf := make([]byte, 1500)
+			for {
+				if _, _, err := sender.Read(buf); err != nil {
+					return
+				}
+			}
+		}()
+	}
+
+	if m.localAudioTrack != nil {
+		sender, err := pc.AddTrack(m.localAudioTrack)
+		if err != nil {
+			pc.Close()
+			m.mu.Unlock()
+			log.Printf("sfu: subscriber[%s] add audio track: %v", id, err)
+			return
+		}
+		addedTrack = true
+		// Drain RTCP from subscriber for audio
+		go func() {
+			buf := make([]byte, 1500)
+			for {
+				if _, _, err := sender.Read(buf); err != nil {
+					return
+				}
+			}
+		}()
+	}
+
+	if !addedTrack {
 		pc.Close()
 		m.mu.Unlock()
-		log.Printf("sfu: subscriber[%s] add track: %v", id, err)
+		log.Printf("sfu: subscriber[%s] rejected: no tracks to subscribe to", id)
 		return
 	}
 
@@ -256,16 +307,6 @@ func (m *Manager) HandleSubscribe(w http.ResponseWriter, r *http.Request) {
 		m.mu.Unlock()
 		pc.Close()
 		log.Printf("sfu: subscriber[%s] ws disconnected (total=%d)", id, m.subCount.Load())
-	}()
-
-	// Drain RTCP from subscriber
-	go func() {
-		buf := make([]byte, 1500)
-		for {
-			if _, _, err := sender.Read(buf); err != nil {
-				return
-			}
-		}
 	}()
 
 	// Send gathered candidates to the client

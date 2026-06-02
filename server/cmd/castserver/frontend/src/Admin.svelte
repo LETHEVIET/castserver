@@ -66,6 +66,12 @@
     { value: 'vp8', name: 'Force VP8 (Highly Optimized)' },
   ];
   let selectedCodec = 'auto';
+  const modeItems = [
+    { value: 'realtime', name: 'Realtime Mode' },
+    { value: 'buffer', name: 'Buffer Mode' }
+  ];
+  let selectedMode = 'realtime';
+  let shareAudio = false;
 
   // Svelte layout control states
   let copiedIp = '';
@@ -142,10 +148,12 @@
           frameRate: { ideal: fpsVal },
           resizeMode: 'none',
         } as MediaTrackConstraints,
-        audio: false,
+        audio: shareAudio,
       });
       castStream = s;
-      s.getAudioTracks().forEach(t => s.removeTrack(t));
+      if (!shareAudio) {
+        s.getAudioTracks().forEach(t => s.removeTrack(t));
+      }
 
       if (castPreview) {
         castPreview.srcObject = castStream;
@@ -157,7 +165,7 @@
       setCtrl('Connecting signaling channel...', false);
 
       const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const wsUrl = proto + '//' + window.location.host + '/webrtc/publish';
+      const wsUrl = proto + '//' + window.location.host + '/webrtc/publish?mode=' + selectedMode;
 
       wsSignaling = new WebSocket(wsUrl);
 
@@ -182,15 +190,15 @@
         }
       };
 
-      const tracks = castStream!.getVideoTracks();
+      const tracks = castStream!.getTracks();
       tracks.forEach(track => {
-        if ('contentHint' in track) {
-          track.contentHint = 'detail';
+        if (track.kind === 'video' && 'contentHint' in track) {
+          track.contentHint = selectedMode === 'realtime' ? 'motion' : 'detail';
         }
         const sender = pc!.addTrack(track, castStream!);
 
         // Apply selected codec preference
-        if (selectedCodec !== 'auto' && typeof RTCRtpSender !== 'undefined' && 'getCapabilities' in RTCRtpSender) {
+        if (track.kind === 'video' && selectedCodec !== 'auto' && typeof RTCRtpSender !== 'undefined' && 'getCapabilities' in RTCRtpSender) {
           const cap = RTCRtpSender.getCapabilities('video');
           if (cap && cap.codecs) {
             const preferredCodecs = cap.codecs.filter(c => c.mimeType.toLowerCase() === `video/${selectedCodec}`);
@@ -239,19 +247,19 @@
             }
             candidateQueue = [];
 
-            if (p.bitrate > 0) {
-              setTimeout(() => {
-                const sender = pc?.getSenders().find(s => s.track?.kind === 'video');
-                if (sender) {
-                  const params = sender.getParameters();
-                  if (!params.encodings) params.encodings = [{}];
+            setTimeout(() => {
+              const sender = pc?.getSenders().find(s => s.track?.kind === 'video');
+              if (sender) {
+                const params = sender.getParameters();
+                if (!params.encodings) params.encodings = [{}];
+                if (p.bitrate > 0) {
                   params.encodings[0].maxBitrate = p.bitrate * 1000;
-                  params.degradationPreference = 'maintain-resolution';
-                  sender.setParameters(params).catch(() => {});
-                  console.log('Applied encoder parameters: maxBitrate =', p.bitrate * 1000, 'degradationPreference = maintain-resolution');
                 }
-              }, 500);
-            }
+                params.degradationPreference = selectedMode === 'realtime' ? 'maintain-framerate' : 'maintain-resolution';
+                sender.setParameters(params).catch(() => {});
+                console.log('Applied encoder parameters: maxBitrate =', p.bitrate * 1000, 'degradationPreference =', params.degradationPreference);
+              }
+            }, 500);
 
             // Start WebRTC Telemetry Loop
             lastBytesSent = 0;
@@ -481,20 +489,38 @@
 
           <div class="space-y-5">
             
-            <!-- Preset Selector -->
-            <div>
-              <label for="preset-select" class="block text-[10px] font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider mb-2 font-mono">Preset Configuration</label>
-              <div class="relative">
-                <select
-                  id="preset-select"
-                  bind:value={selectedPreset}
-                  disabled={casting}
-                  class="w-full select-minimal bg-zinc-50 hover:bg-zinc-100/50 dark:bg-zinc-950/60 dark:hover:bg-zinc-900/60 border border-zinc-250 dark:border-zinc-850 hover:border-zinc-350 dark:hover:border-zinc-800 disabled:opacity-50 text-zinc-800 dark:text-zinc-200 font-mono text-xs rounded-md px-3.5 py-2.5 outline-none transition-minimal focus:border-zinc-400 dark:focus:border-zinc-500 focus:ring-1 focus:ring-zinc-400 dark:focus:ring-zinc-500"
-                >
-                  {#each presets as preset}
-                    <option value={preset.name} class="bg-white dark:bg-zinc-950">{preset.name} ({preset.width > 0 ? `${preset.width}x${preset.height}` : 'Native'})</option>
-                  {/each}
-                </select>
+            <!-- Double Grid: Preset & Mode -->
+            <div class="grid grid-cols-2 gap-4">
+              <div>
+                <label for="preset-select" class="block text-[10px] font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider mb-2 font-mono">Preset Configuration</label>
+                <div class="relative">
+                  <select
+                    id="preset-select"
+                    bind:value={selectedPreset}
+                    disabled={casting}
+                    class="w-full select-minimal bg-zinc-50 hover:bg-zinc-100/50 dark:bg-zinc-950/60 dark:hover:bg-zinc-900/60 border border-zinc-250 dark:border-zinc-850 hover:border-zinc-350 dark:hover:border-zinc-800 disabled:opacity-50 text-zinc-800 dark:text-zinc-200 font-mono text-xs rounded-md px-3.5 py-2.5 outline-none transition-minimal focus:border-zinc-400 dark:focus:border-zinc-500 focus:ring-1 focus:ring-zinc-400 dark:focus:ring-zinc-500"
+                  >
+                    {#each presets as preset}
+                      <option value={preset.name} class="bg-white dark:bg-zinc-950">{preset.name} ({preset.width > 0 ? `${preset.width}x${preset.height}` : 'Native'})</option>
+                    {/each}
+                  </select>
+                </div>
+              </div>
+
+              <div>
+                <label for="mode-select" class="block text-[10px] font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider mb-2 font-mono">Streaming Mode</label>
+                <div class="relative">
+                  <select
+                    id="mode-select"
+                    bind:value={selectedMode}
+                    disabled={casting}
+                    class="w-full select-minimal bg-zinc-50 hover:bg-zinc-100/50 dark:bg-zinc-950/60 dark:hover:bg-zinc-900/60 border border-zinc-250 dark:border-zinc-850 hover:border-zinc-350 dark:hover:border-zinc-800 disabled:opacity-50 text-zinc-800 dark:text-zinc-200 font-mono text-xs rounded-md px-3.5 py-2.5 outline-none transition-minimal focus:border-zinc-400 dark:focus:border-zinc-500 focus:ring-1 focus:ring-zinc-400 dark:focus:ring-zinc-500"
+                  >
+                    {#each modeItems as item}
+                      <option value={item.value} class="bg-white dark:bg-zinc-950">{item.name}</option>
+                    {/each}
+                  </select>
+                </div>
               </div>
             </div>
 
@@ -531,6 +557,20 @@
                   </select>
                 </div>
               </div>
+            </div>
+
+            <!-- Share System Audio Checkbox -->
+            <div class="flex items-center gap-2 py-1">
+              <input
+                type="checkbox"
+                id="share-audio"
+                bind:checked={shareAudio}
+                disabled={casting}
+                class="w-3.5 h-3.5 rounded border-zinc-300 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-950 text-zinc-950 dark:text-white focus:ring-0 focus:ring-offset-0 outline-none transition-minimal cursor-pointer disabled:opacity-50"
+              />
+              <label for="share-audio" class="text-[10px] font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider font-mono cursor-pointer select-none disabled:opacity-50">
+                Share System Audio (Requires browser support)
+              </label>
             </div>
 
             <!-- Cast Action Buttons -->
@@ -714,17 +754,28 @@
 
           <!-- WebRTC Advanced Codec Info (Conditional Footer) -->
           {#if casting}
-            <div class="mt-6 pt-4 border-t border-zinc-200 dark:border-zinc-900 flex items-center justify-between text-[10px] font-mono text-zinc-400 dark:text-zinc-500">
-              <span class="flex items-center gap-1.5">
-                <span class="w-1.5 h-1.5 rounded-full bg-zinc-300 dark:bg-zinc-700"></span>
-                Encoder: <span class="text-zinc-700 dark:text-zinc-400">{encoderInfo || 'H.264'}</span>
-              </span>
-              <span class="flex items-center gap-1.5">
-                Limiter: 
-                <span class="font-semibold uppercase tracking-wider {qualityLimitation === 'none' ? 'text-zinc-450 dark:text-zinc-555' : 'text-amber-600 dark:text-amber-500 status-ring-warning'}">
-                  {qualityLimitation}
+            <div class="mt-6 pt-4 border-t border-zinc-200 dark:border-zinc-900 flex flex-col gap-2 text-[10px] font-mono text-zinc-400 dark:text-zinc-500">
+              <div class="flex items-center justify-between">
+                <span class="flex items-center gap-1.5">
+                  <span class="w-1.5 h-1.5 rounded-full bg-zinc-300 dark:bg-zinc-700"></span>
+                  Encoder: <span class="text-zinc-700 dark:text-zinc-400">{encoderInfo || 'H.264'}</span>
                 </span>
-              </span>
+                <span class="flex items-center gap-1.5">
+                  Limiter: 
+                  <span class="font-semibold uppercase tracking-wider {qualityLimitation === 'none' ? 'text-zinc-450 dark:text-zinc-555' : 'text-amber-600 dark:text-amber-500 status-ring-warning'}">
+                    {qualityLimitation}
+                  </span>
+                </span>
+              </div>
+              <div class="flex items-center justify-between border-t border-zinc-150 dark:border-zinc-900/50 pt-2">
+                <span class="flex items-center gap-1.5">
+                  <span class="w-1.5 h-1.5 rounded-full bg-zinc-300 dark:bg-zinc-700"></span>
+                  Mode: <span class="text-zinc-700 dark:text-zinc-400 capitalize">{selectedMode} Mode</span>
+                </span>
+                <span class="flex items-center gap-1.5">
+                  Audio: <span class="text-zinc-700 dark:text-zinc-400">{shareAudio ? 'Enabled' : 'Disabled'}</span>
+                </span>
+              </div>
             </div>
           {/if}
         </div>

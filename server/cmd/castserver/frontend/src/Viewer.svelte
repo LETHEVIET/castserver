@@ -21,6 +21,15 @@
   let fullscreen = false;
   let idleText = 'Connecting...';
   let errorState = false;
+  let streamMode = 'realtime';
+  let muted = true;
+
+  function toggleMute() {
+    muted = !muted;
+    if (videoEl) {
+      videoEl.muted = muted;
+    }
+  }
 
   // WebRTC Telemetry
   let statsInterval: ReturnType<typeof setInterval> | undefined;
@@ -109,6 +118,7 @@
       if (resp.ok) {
         const s = await resp.json();
         if (s.session_active) {
+          streamMode = s.stream_mode || 'realtime';
           connect();
         } else {
           scheduleReconnect();
@@ -133,6 +143,16 @@
     idleText = 'Connecting...';
     errorState = false;
 
+    try {
+      const statsResp = await fetch('/stats');
+      if (statsResp.ok) {
+        const s = await statsResp.json();
+        streamMode = s.stream_mode || 'realtime';
+      }
+    } catch (e) {
+      console.warn("Failed to pre-fetch stream mode:", e);
+    }
+
     const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = proto + '//' + window.location.host + '/webrtc/subscribe';
 
@@ -143,6 +163,7 @@
     let candidateQueue: RTCIceCandidateInit[] = [];
 
     pc.addTransceiver('video', { direction: 'recvonly' });
+    pc.addTransceiver('audio', { direction: 'recvonly' });
 
     pc.onicecandidate = (event) => {
       if (event.candidate && wsSignaling && wsSignaling.readyState === WebSocket.OPEN) {
@@ -154,6 +175,18 @@
     };
 
     pc.ontrack = (event) => {
+      if (event.receiver) {
+        const receiver = event.receiver;
+        const delay = streamMode === 'buffer' ? 2.0 : 0.0;
+        if ('playoutDelayHint' in receiver) {
+          receiver.playoutDelayHint = delay;
+          console.log(`playoutDelayHint set to ${delay}s on receiver for ${event.track.kind}`);
+        } else if ('jitterBufferDelayHint' in receiver) {
+          (receiver as any).jitterBufferDelayHint = delay;
+          console.log(`jitterBufferDelayHint set to ${delay}s on receiver for ${event.track.kind}`);
+        }
+      }
+
       if (videoEl && event.streams[0]) {
         videoEl.srcObject = event.streams[0];
         if (!streaming) {
@@ -349,7 +382,8 @@
   <!-- Main Stream Output Video -->
   <video
     bind:this={videoEl}
-    autoplay playsinline muted
+    autoplay playsinline
+    muted={muted}
     class="w-full h-full z-0 object-contain transition-minimal"
     class:hidden={!streaming}
   ></video>
@@ -395,6 +429,10 @@
     >
       <div class="text-[9px] font-semibold text-zinc-450 dark:text-zinc-500 uppercase tracking-wider mb-0.5 pb-1.5 border-b border-zinc-200 dark:border-zinc-900">
         Telemetry Data
+      </div>
+      <div class="flex justify-between gap-6">
+        <span class="text-zinc-450 dark:text-zinc-500">Streaming Mode</span>
+        <span class="text-zinc-800 dark:text-zinc-300 font-medium capitalize">{streamMode} Mode</span>
       </div>
       <div class="flex justify-between gap-6">
         <span class="text-zinc-450 dark:text-zinc-500">Resolution</span>
@@ -458,6 +496,28 @@
         {:else}
           <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z"></path>
+          </svg>
+        {/if}
+      </button>
+    </span>
+
+    <span class="w-px h-3 bg-zinc-200 dark:bg-zinc-900"></span>
+
+    <!-- Audio Mute/Unmute Toggle -->
+    <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions -->
+    <span on:click={(e) => { e.stopPropagation(); toggleMute(); showWithTimer(); }}>
+      <button
+        class="bg-zinc-50 hover:bg-zinc-100 dark:bg-zinc-900 dark:hover:bg-zinc-850 border border-zinc-200 dark:border-zinc-850 text-zinc-700 dark:text-zinc-300 text-[10px] font-mono font-medium p-1.5 rounded transition-minimal outline-none flex items-center justify-center"
+        title={muted ? 'Unmute' : 'Mute'}
+      >
+        {#if muted}
+          <svg class="w-3.5 h-3.5 text-rose-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z" />
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2" />
+          </svg>
+        {:else}
+          <svg class="w-3.5 h-3.5 text-emerald-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.536 8.464a5 5 0 010 7.072M18.364 5.636a9 9 0 010 12.728M12 18.75V5.25L7.75 9.5H4.5V14.5H7.75L12 18.75Z" />
           </svg>
         {/if}
       </button>

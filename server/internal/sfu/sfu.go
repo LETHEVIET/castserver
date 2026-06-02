@@ -17,15 +17,29 @@ type Manager struct {
 	mu    sync.Mutex
 	api   *webrtc.API
 
-	pubPC      *webrtc.PeerConnection
-	localTrack *webrtc.TrackLocalStaticRTP
-	rtpCodec   webrtc.RTPCodecCapability
-	pubActive  bool
+	pubPC           *webrtc.PeerConnection
+	localVideoTrack *webrtc.TrackLocalStaticRTP
+	localAudioTrack *webrtc.TrackLocalStaticRTP
+	rtpCodec        webrtc.RTPCodecCapability
+	pubActive       bool
+	streamMode      string
 
 	subPCs      map[string]*webrtc.PeerConnection
 	subCount    atomic.Int32
 
 	onPubChange func(active bool)
+}
+
+func (m *Manager) GetMode() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.streamMode
+}
+
+func (m *Manager) SetMode(mode string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.streamMode = mode
 }
 
 func NewManager() *Manager {
@@ -97,7 +111,7 @@ func (m *Manager) OnPublishOffer(offer webrtc.SessionDescription) (webrtc.Sessio
 
 	pc.OnTrack(func(remote *webrtc.TrackRemote, receiver *webrtc.RTPReceiver) {
 		codec := remote.Codec()
-		log.Printf("sfu: publisher track: %s codec=%s", remote.ID(), codec.MimeType)
+		log.Printf("sfu: publisher track: %s codec=%s kind=%s", remote.ID(), codec.MimeType, remote.Kind().String())
 
 		m.mu.Lock()
 		m.rtpCodec = codec.RTPCodecCapability
@@ -107,15 +121,20 @@ func (m *Manager) OnPublishOffer(offer webrtc.SessionDescription) (webrtc.Sessio
 			log.Printf("sfu: create local track: %v", err)
 			return
 		}
-		m.localTrack = local
+
+		if remote.Kind() == webrtc.RTPCodecTypeVideo {
+			m.localVideoTrack = local
+		} else if remote.Kind() == webrtc.RTPCodecTypeAudio {
+			m.localAudioTrack = local
+		}
 
 		// Dynamic on-the-fly track replacement for all current subscribers!
 		for id, subPC := range m.subPCs {
 			for _, sender := range subPC.GetSenders() {
-				if sender.Track() != nil {
-					log.Printf("sfu: dynamically replacing stream track for subscriber[%s]", id)
+				if sender.Track() != nil && sender.Track().Kind() == remote.Kind() {
+					log.Printf("sfu: dynamically replacing %s track for subscriber[%s]", remote.Kind().String(), id)
 					if err := sender.ReplaceTrack(local); err != nil {
-						log.Printf("sfu: failed to replace stream track for subscriber[%s]: %v", id, err)
+						log.Printf("sfu: failed to replace %s track for subscriber[%s]: %v", remote.Kind().String(), id, err)
 					}
 				}
 			}
@@ -218,7 +237,7 @@ func (m *Manager) OnSubscribeOffer(id string, offer webrtc.SessionDescription) (
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if !m.pubActive || m.localTrack == nil {
+	if !m.pubActive || (m.localVideoTrack == nil && m.localAudioTrack == nil) {
 		return webrtc.SessionDescription{}, fmt.Errorf("no active stream")
 	}
 
@@ -231,21 +250,45 @@ func (m *Manager) OnSubscribeOffer(id string, offer webrtc.SessionDescription) (
 		return webrtc.SessionDescription{}, fmt.Errorf("new subscriber pc: %w", err)
 	}
 
-	sender, err := pc.AddTrack(m.localTrack)
-	if err != nil {
-		pc.Close()
-		return webrtc.SessionDescription{}, fmt.Errorf("add track: %w", err)
+	var addedTrack bool
+	if m.localVideoTrack != nil {
+		sender, err := pc.AddTrack(m.localVideoTrack)
+		if err != nil {
+			pc.Close()
+			return webrtc.SessionDescription{}, fmt.Errorf("add video track: %w", err)
+		}
+		addedTrack = true
+		go func() {
+			buf := make([]byte, 1500)
+			for {
+				if _, _, err := sender.Read(buf); err != nil {
+					return
+				}
+			}
+		}()
 	}
 
-	// Read incoming RTCP packets from the subscriber (NACK, PLI, etc.) so interceptors can process them
-	go func() {
-		buf := make([]byte, 1500)
-		for {
-			if _, _, err := sender.Read(buf); err != nil {
-				return
-			}
+	if m.localAudioTrack != nil {
+		sender, err := pc.AddTrack(m.localAudioTrack)
+		if err != nil {
+			pc.Close()
+			return webrtc.SessionDescription{}, fmt.Errorf("add audio track: %w", err)
 		}
-	}()
+		addedTrack = true
+		go func() {
+			buf := make([]byte, 1500)
+			for {
+				if _, _, err := sender.Read(buf); err != nil {
+					return
+				}
+			}
+		}()
+	}
+
+	if !addedTrack {
+		pc.Close()
+		return webrtc.SessionDescription{}, fmt.Errorf("no tracks available")
+	}
 
 	if err := pc.SetRemoteDescription(offer); err != nil {
 		pc.Close()
@@ -304,7 +347,9 @@ func (m *Manager) closePubLocked() {
 		m.pubPC.Close()
 		m.pubPC = nil
 	}
-	m.localTrack = nil
+	m.localVideoTrack = nil
+	m.localAudioTrack = nil
+	m.streamMode = ""
 	m.pubActive = false
 }
 

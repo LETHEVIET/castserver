@@ -32,6 +32,7 @@ type StatsResponse struct {
 	FramesPublished uint64 `json:"frames_published"`
 	WebSubscribers  int    `json:"web_subscribers"`
 	SessionActive   bool   `json:"session_active"`
+	StreamMode      string `json:"stream_mode"`
 }
 
 type Handler struct {
@@ -152,6 +153,7 @@ func (h *Handler) HandleStats(w http.ResponseWriter, r *http.Request) {
 		FramesPublished: h.framesPub.Load(),
 		WebSubscribers:  h.sfu.SubscriberCount(),
 		SessionActive:   h.sfu.IsActive(),
+		StreamMode:      h.sfu.GetMode(),
 	}
 
 	w.Header().Set("Content-Type", "application/json")
