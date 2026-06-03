@@ -4,9 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"log/slog"
 	"net/http"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"castserver/internal/sfu"
 )
@@ -50,7 +53,7 @@ type Handler struct {
 }
 
 func NewHandler() *Handler {
-	mgr := sfu.NewManager()
+	mgr := sfu.NewManager(nil)
 	h := &Handler{
 		sfu: mgr,
 	}
@@ -94,6 +97,7 @@ func (h *Handler) AcquireSession() (context.Context, context.CancelFunc, error) 
 func (h *Handler) ReleaseSession() {
 	h.sessionMu.Lock()
 	if h.sessionCtx != nil {
+		h.sessionCtx()
 		h.sessionCtx = nil
 	}
 	h.sessionMu.Unlock()
@@ -134,6 +138,15 @@ func (h *Handler) IncrementFrames(n uint64) {
 	h.framesPub.Add(n)
 }
 
+func (h *Handler) buildStatsResponse() StatsResponse {
+	return StatsResponse{
+		FramesPublished: h.framesPub.Load(),
+		WebSubscribers:  h.sfu.SubscriberCount(),
+		SessionActive:   h.sfu.IsActive(),
+		StreamMode:      h.sfu.GetMode(),
+	}
+}
+
 func (h *Handler) HandlePresets(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -148,16 +161,39 @@ func (h *Handler) HandleStats(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(h.buildStatsResponse())
+}
 
-	resp := StatsResponse{
-		FramesPublished: h.framesPub.Load(),
-		WebSubscribers:  h.sfu.SubscriberCount(),
-		SessionActive:   h.sfu.IsActive(),
-		StreamMode:      h.sfu.GetMode(),
+func (h *Handler) HandleStatsStream(w http.ResponseWriter, r *http.Request) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming not supported", http.StatusInternalServerError)
+		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
+	slog.Info("stats stream connected", "remote", r.RemoteAddr)
+	for {
+		select {
+		case <-r.Context().Done():
+			slog.Info("stats stream disconnected", "remote", r.RemoteAddr)
+			return
+		case <-ticker.C:
+			data, err := json.Marshal(h.buildStatsResponse())
+			if err != nil {
+				continue
+			}
+			fmt.Fprintf(w, "data: %s\n\n", data)
+			flusher.Flush()
+		}
+	}
 }
 
 func LookupPreset(name string) (Preset, bool) {

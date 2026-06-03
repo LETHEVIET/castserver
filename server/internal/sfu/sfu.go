@@ -1,21 +1,20 @@
 package sfu
 
 import (
-	"fmt"
-	"log"
+	"log/slog"
 	"sync"
 	"sync/atomic"
-	"time"
 
 	"github.com/pion/ice/v4"
 	"github.com/pion/interceptor"
-	"github.com/pion/rtcp"
 	"github.com/pion/webrtc/v4"
 )
 
 type Manager struct {
-	mu    sync.Mutex
-	api   *webrtc.API
+	mu  sync.Mutex
+	api *webrtc.API
+
+	iceServers []webrtc.ICEServer
 
 	pubPC           *webrtc.PeerConnection
 	localVideoTrack *webrtc.TrackLocalStaticRTP
@@ -24,8 +23,8 @@ type Manager struct {
 	pubActive       bool
 	streamMode      string
 
-	subPCs      map[string]*webrtc.PeerConnection
-	subCount    atomic.Int32
+	subPCs   map[string]*webrtc.PeerConnection
+	subCount atomic.Int32
 
 	onPubChange func(active bool)
 }
@@ -42,7 +41,7 @@ func (m *Manager) SetMode(mode string) {
 	m.streamMode = mode
 }
 
-func NewManager() *Manager {
+func NewManager(iceServers []webrtc.ICEServer) *Manager {
 	s := webrtc.SettingEngine{}
 
 	s.SetNetworkTypes([]webrtc.NetworkType{
@@ -61,13 +60,12 @@ func NewManager() *Manager {
 
 	m := &webrtc.MediaEngine{}
 	if err := m.RegisterDefaultCodecs(); err != nil {
-		log.Printf("sfu: register default codecs: %v", err)
+		slog.Warn("register default codecs", "error", err)
 	}
 
-	// Create and register the default interceptor registry (enables NACK packet cache, PLI, and bandwidth stats)
 	i := &interceptor.Registry{}
 	if err := webrtc.RegisterDefaultInterceptors(m, i); err != nil {
-		log.Printf("sfu: register default interceptors: %v", err)
+		slog.Warn("register default interceptors", "error", err)
 	}
 
 	api := webrtc.NewAPI(
@@ -77,9 +75,16 @@ func NewManager() *Manager {
 	)
 
 	return &Manager{
-		api:     api,
-		subPCs:  make(map[string]*webrtc.PeerConnection),
+		api:        api,
+		iceServers: iceServers,
+		subPCs:     make(map[string]*webrtc.PeerConnection),
 	}
+}
+
+func (m *Manager) SetICEServers(servers []webrtc.ICEServer) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.iceServers = servers
 }
 
 func (m *Manager) SetPubChangeCallback(fn func(active bool)) {
@@ -96,239 +101,6 @@ func (m *Manager) IsActive() bool {
 
 func (m *Manager) SubscriberCount() int {
 	return int(m.subCount.Load())
-}
-
-func (m *Manager) OnPublishOffer(offer webrtc.SessionDescription) (webrtc.SessionDescription, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	m.closePubLocked()
-
-	pc, err := m.api.NewPeerConnection(webrtc.Configuration{})
-	if err != nil {
-		return webrtc.SessionDescription{}, fmt.Errorf("new publisher pc: %w", err)
-	}
-
-	pc.OnTrack(func(remote *webrtc.TrackRemote, receiver *webrtc.RTPReceiver) {
-		codec := remote.Codec()
-		log.Printf("sfu: publisher track: %s codec=%s kind=%s", remote.ID(), codec.MimeType, remote.Kind().String())
-
-		m.mu.Lock()
-		m.rtpCodec = codec.RTPCodecCapability
-		local, err := webrtc.NewTrackLocalStaticRTP(codec.RTPCodecCapability, remote.ID(), remote.StreamID())
-		if err != nil {
-			m.mu.Unlock()
-			log.Printf("sfu: create local track: %v", err)
-			return
-		}
-
-		if remote.Kind() == webrtc.RTPCodecTypeVideo {
-			m.localVideoTrack = local
-		} else if remote.Kind() == webrtc.RTPCodecTypeAudio {
-			m.localAudioTrack = local
-		}
-
-		// Dynamic on-the-fly track replacement for all current subscribers!
-		for id, subPC := range m.subPCs {
-			for _, sender := range subPC.GetSenders() {
-				if sender.Track() != nil && sender.Track().Kind() == remote.Kind() {
-					log.Printf("sfu: dynamically replacing %s track for subscriber[%s]", remote.Kind().String(), id)
-					if err := sender.ReplaceTrack(local); err != nil {
-						log.Printf("sfu: failed to replace %s track for subscriber[%s]: %v", remote.Kind().String(), id, err)
-					}
-				}
-			}
-		}
-		m.mu.Unlock()
-
-		// Read incoming RTCP packets to drain the buffer and allow interceptors (NACK, PLI) to work
-		go func() {
-			buf := make([]byte, 1500)
-			for {
-				if _, _, err := receiver.Read(buf); err != nil {
-					return
-				}
-			}
-		}()
-
-		done := make(chan struct{})
-		defer close(done)
-
-		// Ask the publisher for keyframe periodically so new subscribers get a keyframe quickly.
-		go func() {
-			ticker := time.NewTicker(2 * time.Second)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-done:
-					return
-				case <-ticker.C:
-					if m.SubscriberCount() > 0 {
-						_ = pc.WriteRTCP([]rtcp.Packet{
-							&rtcp.PictureLossIndication{
-								MediaSSRC: uint32(remote.SSRC()),
-							},
-						})
-					}
-				}
-			}
-		}()
-
-		for {
-			pkt, _, err := remote.ReadRTP()
-			if err != nil {
-				log.Printf("sfu: publisher RTP read done: %v", err)
-				return
-			}
-			if werr := local.WriteRTP(pkt); werr != nil {
-				log.Printf("sfu: local track write: %v", werr)
-			}
-		}
-	})
-
-	pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
-		log.Printf("sfu: publisher conn state=%s", state)
-		if state == webrtc.PeerConnectionStateFailed ||
-			state == webrtc.PeerConnectionStateClosed {
-			m.mu.Lock()
-			if m.pubPC == pc {
-				m.closePubLocked()
-				if m.onPubChange != nil {
-					m.onPubChange(false)
-				}
-			}
-			m.mu.Unlock()
-		}
-	})
-
-	if err := pc.SetRemoteDescription(offer); err != nil {
-		pc.Close()
-		return webrtc.SessionDescription{}, fmt.Errorf("set remote desc: %w", err)
-	}
-
-	log.Printf("sfu: creating answer (ICE gathering may take a moment)...")
-	answer, err := pc.CreateAnswer(nil)
-	if err != nil {
-		pc.Close()
-		return webrtc.SessionDescription{}, fmt.Errorf("create answer: %w", err)
-	}
-
-	if err := pc.SetLocalDescription(answer); err != nil {
-		pc.Close()
-		return webrtc.SessionDescription{}, fmt.Errorf("set local desc: %w", err)
-	}
-
-	// Wait for ICE gathering to complete so the returned SDP contains all host candidates
-	gatherComplete := webrtc.GatheringCompletePromise(pc)
-	<-gatherComplete
-	log.Printf("sfu: answer created, local candidates gathered")
-
-	m.pubPC = pc
-	m.pubActive = true
-	if m.onPubChange != nil {
-		m.onPubChange(true)
-	}
-
-	log.Printf("sfu: publisher connected")
-	return *pc.LocalDescription(), nil
-}
-
-func (m *Manager) OnSubscribeOffer(id string, offer webrtc.SessionDescription) (webrtc.SessionDescription, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if !m.pubActive || (m.localVideoTrack == nil && m.localAudioTrack == nil) {
-		return webrtc.SessionDescription{}, fmt.Errorf("no active stream")
-	}
-
-	if old, ok := m.subPCs[id]; ok {
-		old.Close()
-	}
-
-	pc, err := m.api.NewPeerConnection(webrtc.Configuration{})
-	if err != nil {
-		return webrtc.SessionDescription{}, fmt.Errorf("new subscriber pc: %w", err)
-	}
-
-	var addedTrack bool
-	if m.localVideoTrack != nil {
-		sender, err := pc.AddTrack(m.localVideoTrack)
-		if err != nil {
-			pc.Close()
-			return webrtc.SessionDescription{}, fmt.Errorf("add video track: %w", err)
-		}
-		addedTrack = true
-		go func() {
-			buf := make([]byte, 1500)
-			for {
-				if _, _, err := sender.Read(buf); err != nil {
-					return
-				}
-			}
-		}()
-	}
-
-	if m.localAudioTrack != nil {
-		sender, err := pc.AddTrack(m.localAudioTrack)
-		if err != nil {
-			pc.Close()
-			return webrtc.SessionDescription{}, fmt.Errorf("add audio track: %w", err)
-		}
-		addedTrack = true
-		go func() {
-			buf := make([]byte, 1500)
-			for {
-				if _, _, err := sender.Read(buf); err != nil {
-					return
-				}
-			}
-		}()
-	}
-
-	if !addedTrack {
-		pc.Close()
-		return webrtc.SessionDescription{}, fmt.Errorf("no tracks available")
-	}
-
-	if err := pc.SetRemoteDescription(offer); err != nil {
-		pc.Close()
-		return webrtc.SessionDescription{}, fmt.Errorf("set remote desc: %w", err)
-	}
-
-	answer, err := pc.CreateAnswer(nil)
-	if err != nil {
-		pc.Close()
-		return webrtc.SessionDescription{}, fmt.Errorf("create answer: %w", err)
-	}
-
-	if err := pc.SetLocalDescription(answer); err != nil {
-		pc.Close()
-		return webrtc.SessionDescription{}, fmt.Errorf("set local desc: %w", err)
-	}
-
-	// Wait for ICE gathering to complete so the returned SDP contains all host candidates
-	gatherComplete := webrtc.GatheringCompletePromise(pc)
-	<-gatherComplete
-
-	pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
-		log.Printf("sfu: subscriber[%s] conn state=%s", id, state)
-		if state == webrtc.PeerConnectionStateFailed ||
-			state == webrtc.PeerConnectionStateClosed {
-			m.mu.Lock()
-			if m.subPCs[id] == pc {
-				delete(m.subPCs, id)
-				m.subCount.Add(-1)
-			}
-			m.mu.Unlock()
-			pc.Close()
-		}
-	})
-
-	m.subPCs[id] = pc
-	m.subCount.Add(1)
-
-	log.Printf("sfu: subscriber[%s] connected (total=%d)", id, m.subCount.Load())
-	return *pc.LocalDescription(), nil
 }
 
 func (m *Manager) Stop() {
@@ -351,14 +123,4 @@ func (m *Manager) closePubLocked() {
 	m.localAudioTrack = nil
 	m.streamMode = ""
 	m.pubActive = false
-}
-
-func (m *Manager) SubscribeDisconnect(id string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if pc, ok := m.subPCs[id]; ok {
-		pc.Close()
-		delete(m.subPCs, id)
-		m.subCount.Add(-1)
-	}
 }

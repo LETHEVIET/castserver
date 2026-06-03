@@ -2,36 +2,79 @@ package sfu
 
 import (
 	"encoding/json"
-	"log"
+	"log/slog"
 	"net/http"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"github.com/pion/rtcp"
 	"github.com/pion/webrtc/v4"
 )
 
+const (
+	pingPeriod   = 30 * time.Second
+	pongWait     = 60 * time.Second
+	wsMaxMsgSize = 32768
+)
+
 var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool {
-		return true // Allow all origins for local casting
+		return true
 	},
 }
 
 type SignalingMessage struct {
-	Type      string                    `json:"type"`                // "offer", "answer", "candidate", "error"
-	SDP       string                    `json:"sdp,omitempty"`
+	Type      string                   `json:"type"`
+	SDP       string                   `json:"sdp,omitempty"`
 	Candidate *webrtc.ICECandidateInit `json:"candidate,omitempty"`
+}
+
+func (m *Manager) newPCConfig() webrtc.Configuration {
+	cfg := webrtc.Configuration{}
+	if len(m.iceServers) > 0 {
+		cfg.ICEServers = m.iceServers
+	}
+	return cfg
+}
+
+func (m *Manager) startPing(conn *websocket.Conn) func() {
+	done := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(pingPeriod)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+					return
+				}
+			}
+		}
+	}()
+	return func() { close(done) }
 }
 
 func (m *Manager) HandlePublish(w http.ResponseWriter, r *http.Request) {
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		log.Printf("sfu: publish ws upgrade failed: %v", err)
+		slog.Error("publish ws upgrade failed", "error", err)
 		return
 	}
 	defer conn.Close()
 
-	log.Printf("sfu: publisher ws connected")
+	conn.SetReadLimit(wsMaxMsgSize)
+	conn.SetReadDeadline(time.Now().Add(pongWait))
+	conn.SetPongHandler(func(string) error {
+		conn.SetReadDeadline(time.Now().Add(pongWait))
+		return nil
+	})
+	stopPing := m.startPing(conn)
+	defer stopPing()
+
+	slog.Info("publisher ws connected")
 
 	mode := r.URL.Query().Get("mode")
 	if mode == "" {
@@ -42,10 +85,10 @@ func (m *Manager) HandlePublish(w http.ResponseWriter, r *http.Request) {
 	m.closePubLocked()
 	m.streamMode = mode
 
-	pc, err := m.api.NewPeerConnection(webrtc.Configuration{})
+	pc, err := m.api.NewPeerConnection(m.newPCConfig())
 	if err != nil {
 		m.mu.Unlock()
-		log.Printf("sfu: create publisher pc: %v", err)
+		slog.Error("create publisher pc", "error", err)
 		return
 	}
 	m.pubPC = pc
@@ -65,10 +108,9 @@ func (m *Manager) HandlePublish(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		m.mu.Unlock()
-		log.Printf("sfu: publisher ws disconnected")
+		slog.Info("publisher ws disconnected")
 	}()
 
-	// Send gathered candidates to the client
 	pc.OnICECandidate(func(c *webrtc.ICECandidate) {
 		if c == nil {
 			return
@@ -87,14 +129,18 @@ func (m *Manager) HandlePublish(w http.ResponseWriter, r *http.Request) {
 
 	pc.OnTrack(func(remote *webrtc.TrackRemote, receiver *webrtc.RTPReceiver) {
 		codec := remote.Codec()
-		log.Printf("sfu: publisher track: %s codec=%s kind=%s", remote.ID(), codec.MimeType, remote.Kind().String())
+		slog.Info("publisher track received",
+			"track_id", remote.ID(),
+			"codec", codec.MimeType,
+			"kind", remote.Kind().String(),
+		)
 
 		m.mu.Lock()
 		m.rtpCodec = codec.RTPCodecCapability
 		local, err := webrtc.NewTrackLocalStaticRTP(codec.RTPCodecCapability, remote.ID(), remote.StreamID())
 		if err != nil {
 			m.mu.Unlock()
-			log.Printf("sfu: create local track: %v", err)
+			slog.Error("create local track", "error", err)
 			return
 		}
 
@@ -104,20 +150,25 @@ func (m *Manager) HandlePublish(w http.ResponseWriter, r *http.Request) {
 			m.localAudioTrack = local
 		}
 
-		// Dynamic on-the-fly track replacement for all current subscribers!
 		for id, subPC := range m.subPCs {
 			for _, sender := range subPC.GetSenders() {
 				if sender.Track() != nil && sender.Track().Kind() == remote.Kind() {
-					log.Printf("sfu: dynamically replacing %s track for subscriber[%s]", remote.Kind().String(), id)
+					slog.Info("replacing track for subscriber",
+						"kind", remote.Kind().String(),
+						"subscriber", id,
+					)
 					if err := sender.ReplaceTrack(local); err != nil {
-						log.Printf("sfu: failed to replace %s track for subscriber[%s]: %v", remote.Kind().String(), id, err)
+						slog.Error("failed to replace track for subscriber",
+							"kind", remote.Kind().String(),
+							"subscriber", id,
+							"error", err,
+						)
 					}
 				}
 			}
 		}
 		m.mu.Unlock()
 
-		// Drain RTCP
 		go func() {
 			buf := make([]byte, 1500)
 			for {
@@ -152,23 +203,22 @@ func (m *Manager) HandlePublish(w http.ResponseWriter, r *http.Request) {
 		for {
 			pkt, _, err := remote.ReadRTP()
 			if err != nil {
-				log.Printf("sfu: publisher RTP read done: %v", err)
+				slog.Info("publisher RTP read done", "error", err)
 				return
 			}
 			if werr := local.WriteRTP(pkt); werr != nil {
-				log.Printf("sfu: local track write: %v", werr)
+				slog.Error("local track write", "error", werr)
 			}
 		}
 	})
 
 	pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
-		log.Printf("sfu: publisher conn state=%s", state)
+		slog.Info("publisher conn state", "state", state.String())
 		if state == webrtc.PeerConnectionStateFailed || state == webrtc.PeerConnectionStateClosed {
 			conn.Close()
 		}
 	})
 
-	// Message loop
 	for {
 		_, payload, err := conn.ReadMessage()
 		if err != nil {
@@ -186,18 +236,18 @@ func (m *Manager) HandlePublish(w http.ResponseWriter, r *http.Request) {
 				Type: webrtc.SDPTypeOffer,
 				SDP:  msg.SDP,
 			}); err != nil {
-				log.Printf("sfu: publisher set remote desc: %v", err)
+				slog.Error("publisher set remote desc", "error", err)
 				return
 			}
 
 			answer, err := pc.CreateAnswer(nil)
 			if err != nil {
-				log.Printf("sfu: publisher create answer: %v", err)
+				slog.Error("publisher create answer", "error", err)
 				return
 			}
 
 			if err := pc.SetLocalDescription(answer); err != nil {
-				log.Printf("sfu: publisher set local desc: %v", err)
+				slog.Error("publisher set local desc", "error", err)
 				return
 			}
 
@@ -211,7 +261,7 @@ func (m *Manager) HandlePublish(w http.ResponseWriter, r *http.Request) {
 		case "candidate":
 			if msg.Candidate != nil {
 				if err := pc.AddICECandidate(*msg.Candidate); err != nil {
-					log.Printf("sfu: publisher add candidate: %v", err)
+					slog.Error("publisher add candidate", "error", err)
 				}
 			}
 		}
@@ -221,28 +271,37 @@ func (m *Manager) HandlePublish(w http.ResponseWriter, r *http.Request) {
 func (m *Manager) HandleSubscribe(w http.ResponseWriter, r *http.Request) {
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		log.Printf("sfu: subscribe ws upgrade failed: %v", err)
+		slog.Error("subscribe ws upgrade failed", "error", err)
 		return
 	}
 	defer conn.Close()
 
-	id := r.RemoteAddr
-	log.Printf("sfu: subscriber[%s] ws connected", id)
+	conn.SetReadLimit(wsMaxMsgSize)
+	conn.SetReadDeadline(time.Now().Add(pongWait))
+	conn.SetPongHandler(func(string) error {
+		conn.SetReadDeadline(time.Now().Add(pongWait))
+		return nil
+	})
+	stopPing := m.startPing(conn)
+	defer stopPing()
+
+	id := uuid.NewString()
+	slog.Info("subscriber ws connected", "subscriber", id)
 
 	m.mu.Lock()
 	if !m.pubActive || (m.localVideoTrack == nil && m.localAudioTrack == nil) {
 		m.mu.Unlock()
-		log.Printf("sfu: subscribe[%s] rejected: no active stream", id)
+		slog.Info("subscriber rejected: no active stream", "subscriber", id)
 		msg := SignalingMessage{Type: "error", SDP: "no active stream"}
 		payload, _ := json.Marshal(msg)
 		_ = conn.WriteMessage(websocket.TextMessage, payload)
 		return
 	}
 
-	pc, err := m.api.NewPeerConnection(webrtc.Configuration{})
+	pc, err := m.api.NewPeerConnection(m.newPCConfig())
 	if err != nil {
 		m.mu.Unlock()
-		log.Printf("sfu: subscriber[%s] create pc: %v", id, err)
+		slog.Error("create subscriber pc", "subscriber", id, "error", err)
 		return
 	}
 
@@ -252,11 +311,10 @@ func (m *Manager) HandleSubscribe(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			pc.Close()
 			m.mu.Unlock()
-			log.Printf("sfu: subscriber[%s] add video track: %v", id, err)
+			slog.Error("add video track for subscriber", "subscriber", id, "error", err)
 			return
 		}
 		addedTrack = true
-		// Drain RTCP from subscriber for video
 		go func() {
 			buf := make([]byte, 1500)
 			for {
@@ -272,11 +330,10 @@ func (m *Manager) HandleSubscribe(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			pc.Close()
 			m.mu.Unlock()
-			log.Printf("sfu: subscriber[%s] add audio track: %v", id, err)
+			slog.Error("add audio track for subscriber", "subscriber", id, "error", err)
 			return
 		}
 		addedTrack = true
-		// Drain RTCP from subscriber for audio
 		go func() {
 			buf := make([]byte, 1500)
 			for {
@@ -290,7 +347,7 @@ func (m *Manager) HandleSubscribe(w http.ResponseWriter, r *http.Request) {
 	if !addedTrack {
 		pc.Close()
 		m.mu.Unlock()
-		log.Printf("sfu: subscriber[%s] rejected: no tracks to subscribe to", id)
+		slog.Info("subscriber rejected: no tracks", "subscriber", id)
 		return
 	}
 
@@ -306,10 +363,9 @@ func (m *Manager) HandleSubscribe(w http.ResponseWriter, r *http.Request) {
 		}
 		m.mu.Unlock()
 		pc.Close()
-		log.Printf("sfu: subscriber[%s] ws disconnected (total=%d)", id, m.subCount.Load())
+		slog.Info("subscriber ws disconnected", "subscriber", id, "total", m.subCount.Load())
 	}()
 
-	// Send gathered candidates to the client
 	pc.OnICECandidate(func(c *webrtc.ICECandidate) {
 		if c == nil {
 			return
@@ -327,13 +383,12 @@ func (m *Manager) HandleSubscribe(w http.ResponseWriter, r *http.Request) {
 	})
 
 	pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
-		log.Printf("sfu: subscriber[%s] conn state=%s", id, state)
+		slog.Info("subscriber conn state", "subscriber", id, "state", state.String())
 		if state == webrtc.PeerConnectionStateFailed || state == webrtc.PeerConnectionStateClosed {
 			conn.Close()
 		}
 	})
 
-	// Message loop
 	for {
 		_, payload, err := conn.ReadMessage()
 		if err != nil {
@@ -351,18 +406,18 @@ func (m *Manager) HandleSubscribe(w http.ResponseWriter, r *http.Request) {
 				Type: webrtc.SDPTypeOffer,
 				SDP:  msg.SDP,
 			}); err != nil {
-				log.Printf("sfu: subscriber[%s] set remote desc: %v", id, err)
+				slog.Error("subscriber set remote desc", "subscriber", id, "error", err)
 				return
 			}
 
 			answer, err := pc.CreateAnswer(nil)
 			if err != nil {
-				log.Printf("sfu: subscriber[%s] create answer: %v", id, err)
+				slog.Error("subscriber create answer", "subscriber", id, "error", err)
 				return
 			}
 
 			if err := pc.SetLocalDescription(answer); err != nil {
-				log.Printf("sfu: subscriber[%s] set local desc: %v", id, err)
+				slog.Error("subscriber set local desc", "subscriber", id, "error", err)
 				return
 			}
 
@@ -376,7 +431,7 @@ func (m *Manager) HandleSubscribe(w http.ResponseWriter, r *http.Request) {
 		case "candidate":
 			if msg.Candidate != nil {
 				if err := pc.AddICECandidate(*msg.Candidate); err != nil {
-					log.Printf("sfu: subscriber[%s] add candidate: %v", id, err)
+					slog.Error("subscriber add candidate", "subscriber", id, "error", err)
 				}
 			}
 		}

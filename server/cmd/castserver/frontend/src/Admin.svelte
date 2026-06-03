@@ -49,6 +49,7 @@
   let castPreview: HTMLVideoElement;
 
   let pollInterval: ReturnType<typeof setInterval> | undefined;
+  let statsES: EventSource | null = null;
 
   $: presetItems = presets.map(p => ({ value: p.name, name: p.name }));
   const fpsItems = [
@@ -146,7 +147,7 @@
           width: p.width > 0 ? { ideal: p.width } : undefined,
           height: p.height > 0 ? { ideal: p.height } : undefined,
           frameRate: { ideal: fpsVal },
-          resizeMode: 'none',
+          resizeMode: 'crop-and-scale',
         } as MediaTrackConstraints,
         audio: shareAudio,
       });
@@ -255,9 +256,18 @@
                 if (p.bitrate > 0) {
                   params.encodings[0].maxBitrate = p.bitrate * 1000;
                 }
+                if (p.width > 0 && p.height > 0 && sender.track) {
+                  const settings = sender.track.getSettings();
+                  const srcW = settings.width || 1920;
+                  const srcH = settings.height || 1080;
+                  const scale = Math.max(srcW / p.width, srcH / p.height);
+                  if (scale > 1.0) {
+                    params.encodings[0].scaleResolutionDownBy = Math.min(scale, 4.0);
+                  }
+                }
                 params.degradationPreference = selectedMode === 'realtime' ? 'maintain-framerate' : 'maintain-resolution';
                 sender.setParameters(params).catch(() => {});
-                console.log('Applied encoder parameters: maxBitrate =', p.bitrate * 1000, 'degradationPreference =', params.degradationPreference);
+                console.log('Applied encoder parameters: maxBitrate =', p.bitrate * 1000, 'scaleResolutionDownBy =', params.encodings[0].scaleResolutionDownBy, 'degradationPreference =', params.degradationPreference);
               }
             }, 500);
 
@@ -356,15 +366,6 @@
     castCleanup();
   }
 
-  async function loadStats() {
-    try {
-      const s: Stats = await (await fetch('/stats')).json();
-      framesPublished = s.frames_published ?? 0;
-      webSubscribers = s.web_subscribers ?? 0;
-      sessionActive = s.session_active;
-    } catch { }
-  }
-
   async function checkServer() {
     try {
       await fetch('/health');
@@ -409,15 +410,22 @@
     isDark = document.documentElement.classList.contains('dark');
     checkServer();
     loadPresets();
-    loadStats();
     loadInterfaces();
-    pollInterval = setInterval(() => {
-      checkServer();
-      loadStats();
-    }, 2000);
+
+    statsES = new EventSource('/stats/stream');
+    statsES.onmessage = (ev) => {
+      try {
+        const s = JSON.parse(ev.data);
+        framesPublished = s.frames_published ?? 0;
+        webSubscribers = s.web_subscribers ?? 0;
+        sessionActive = s.session_active;
+      } catch {}
+    };
+    statsES.onopen = () => { online = true; };
+    statsES.onerror = () => { online = false; };
   });
   onDestroy(() => {
-    if (pollInterval) clearInterval(pollInterval);
+    if (statsES) statsES.close();
     castCleanup();
   });
 </script>
