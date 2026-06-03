@@ -27,7 +27,7 @@ func Presets() []Preset {
 		{Name: "Low Latency", Width: 854, Height: 480, FPS: 30, Bitrate: 1000},
 		{Name: "Balanced", Width: 1280, Height: 720, FPS: 30, Bitrate: 3000},
 		{Name: "High Quality", Width: 1920, Height: 1080, FPS: 60, Bitrate: 8000},
-		{Name: "Native", Width: 0, Height: 0, FPS: 60, Bitrate: 8000},
+		{Name: "Native", Width: 0, Height: 0, FPS: 60, Bitrate: 50000},
 	}
 }
 

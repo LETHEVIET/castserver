@@ -147,7 +147,7 @@
           width: p.width > 0 ? { ideal: p.width } : undefined,
           height: p.height > 0 ? { ideal: p.height } : undefined,
           frameRate: { ideal: fpsVal },
-          resizeMode: 'crop-and-scale',
+          resizeMode: 'none',
         } as MediaTrackConstraints,
         audio: shareAudio,
       });
@@ -194,7 +194,7 @@
       const tracks = castStream!.getTracks();
       tracks.forEach(track => {
         if (track.kind === 'video' && 'contentHint' in track) {
-          track.contentHint = selectedMode === 'realtime' ? 'motion' : 'detail';
+          track.contentHint = 'detail';
         }
         const sender = pc!.addTrack(track, castStream!);
 
@@ -265,7 +265,7 @@
                     params.encodings[0].scaleResolutionDownBy = Math.min(scale, 4.0);
                   }
                 }
-                params.degradationPreference = selectedMode === 'realtime' ? 'maintain-framerate' : 'maintain-resolution';
+                params.degradationPreference = 'maintain-resolution';
                 sender.setParameters(params).catch(() => {});
                 console.log('Applied encoder parameters: maxBitrate =', p.bitrate * 1000, 'scaleResolutionDownBy =', params.encodings[0].scaleResolutionDownBy, 'degradationPreference =', params.degradationPreference);
               }
