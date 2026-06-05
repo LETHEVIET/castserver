@@ -194,7 +194,7 @@
       const tracks = castStream!.getTracks();
       tracks.forEach(track => {
         if (track.kind === 'video' && 'contentHint' in track) {
-          track.contentHint = 'detail';
+          track.contentHint = 'text';
         }
         const sender = pc!.addTrack(track, castStream!);
 
@@ -256,6 +256,9 @@
                 if (p.bitrate > 0) {
                   params.encodings[0].maxBitrate = p.bitrate * 1000;
                 }
+                if (p.fps > 0) {
+                  params.encodings[0].maxFramerate = p.fps;
+                }
                 if (p.width > 0 && p.height > 0 && sender.track) {
                   const settings = sender.track.getSettings();
                   const srcW = settings.width || 1920;
@@ -265,9 +268,9 @@
                     params.encodings[0].scaleResolutionDownBy = Math.min(scale, 4.0);
                   }
                 }
-                params.degradationPreference = 'maintain-resolution';
+                params.degradationPreference = 'maintain-framerate';
                 sender.setParameters(params).catch(() => {});
-                console.log('Applied encoder parameters: maxBitrate =', p.bitrate * 1000, 'scaleResolutionDownBy =', params.encodings[0].scaleResolutionDownBy, 'degradationPreference =', params.degradationPreference);
+                console.log('Applied encoder parameters: maxBitrate =', p.bitrate * 1000, 'maxFramerate =', p.fps, 'scaleResolutionDownBy =', params.encodings[0].scaleResolutionDownBy, 'degradationPreference =', params.degradationPreference);
               }
             }, 500);
 

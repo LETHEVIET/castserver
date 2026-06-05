@@ -4,11 +4,18 @@ import (
 	"log/slog"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/pion/ice/v4"
 	"github.com/pion/interceptor"
+	"github.com/pion/rtcp"
+	"github.com/pion/rtp"
 	"github.com/pion/webrtc/v4"
 )
+
+var rtpBufPool = sync.Pool{
+	New: func() any { return make([]byte, 1500) },
+}
 
 type Manager struct {
 	mu  sync.Mutex
@@ -17,6 +24,8 @@ type Manager struct {
 	iceServers []webrtc.ICEServer
 
 	pubPC           *webrtc.PeerConnection
+	pubVideoSSRC    uint32
+	pubAudioSSRC    uint32
 	localVideoTrack *webrtc.TrackLocalStaticRTP
 	localAudioTrack *webrtc.TrackLocalStaticRTP
 	rtpCodec        webrtc.RTPCodecCapability
@@ -26,7 +35,53 @@ type Manager struct {
 	subPCs   map[string]*webrtc.PeerConnection
 	subCount atomic.Int32
 
+	lastKeyframe   *rtp.Packet
+	lastKeyframeAt time.Time
+
 	onPubChange func(active bool)
+}
+
+func (m *Manager) GetPubPC() *webrtc.PeerConnection {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.pubPC
+}
+
+func (m *Manager) ForwardRTCPToPublisher(pkts []rtcp.Packet) {
+	m.mu.Lock()
+	pc := m.pubPC
+	m.mu.Unlock()
+	if pc != nil && len(pkts) > 0 {
+		if err := pc.WriteRTCP(pkts); err != nil {
+			slog.Debug("forward rtcp to publisher", "error", err, "packets", len(pkts))
+		}
+	}
+}
+
+func (m *Manager) RequestKeyframe() {
+	m.mu.Lock()
+	pc := m.pubPC
+	ssrc := m.pubVideoSSRC
+	m.mu.Unlock()
+	if pc != nil && ssrc != 0 {
+		slog.Debug("requesting keyframe (PLI)")
+		_ = pc.WriteRTCP([]rtcp.Packet{
+			&rtcp.PictureLossIndication{MediaSSRC: ssrc},
+		})
+	}
+}
+
+func (m *Manager) SetLastKeyframe(pkt *rtp.Packet) {
+	m.mu.Lock()
+	m.lastKeyframe = pkt
+	m.lastKeyframeAt = time.Now()
+	m.mu.Unlock()
+}
+
+func (m *Manager) GetLastKeyframe() *rtp.Packet {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.lastKeyframe
 }
 
 func (m *Manager) GetMode() string {
@@ -121,6 +176,9 @@ func (m *Manager) closePubLocked() {
 	}
 	m.localVideoTrack = nil
 	m.localAudioTrack = nil
+	m.pubVideoSSRC = 0
+	m.pubAudioSSRC = 0
+	m.lastKeyframe = nil
 	m.streamMode = ""
 	m.pubActive = false
 }

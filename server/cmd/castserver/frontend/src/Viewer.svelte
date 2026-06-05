@@ -177,7 +177,7 @@
     pc.ontrack = (event) => {
       if (event.receiver) {
         const receiver = event.receiver;
-        const delay = streamMode === 'buffer' ? 2.0 : 0.0;
+        const delay = streamMode === 'buffer' ? 0.05 : 0.0;
         if ('playoutDelayHint' in receiver) {
           receiver.playoutDelayHint = delay;
           console.log(`playoutDelayHint set to ${delay}s on receiver for ${event.track.kind}`);

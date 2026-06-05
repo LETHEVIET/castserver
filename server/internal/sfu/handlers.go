@@ -57,6 +57,32 @@ func (m *Manager) startPing(conn *websocket.Conn) func() {
 	return func() { close(done) }
 }
 
+func isKeyframe(mimeType string, payload []byte) bool {
+	if len(payload) < 1 {
+		return false
+	}
+	switch mimeType {
+	case webrtc.MimeTypeVP8:
+		if payload[0]&0x10 == 0 {
+			return false
+		}
+		if payload[0]&0x80 == 0 {
+			return payload[0]&0x0F == 0
+		}
+		if len(payload) < 2 {
+			return false
+		}
+		return payload[1]&0x07 == 0
+	case webrtc.MimeTypeH264:
+		nalType := payload[0] & 0x1F
+		return nalType == 5 || nalType == 7
+	case webrtc.MimeTypeVP9:
+		return true
+	default:
+		return false
+	}
+}
+
 func (m *Manager) HandlePublish(w http.ResponseWriter, r *http.Request) {
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -133,10 +159,16 @@ func (m *Manager) HandlePublish(w http.ResponseWriter, r *http.Request) {
 			"track_id", remote.ID(),
 			"codec", codec.MimeType,
 			"kind", remote.Kind().String(),
+			"ssrc", remote.SSRC(),
 		)
 
 		m.mu.Lock()
 		m.rtpCodec = codec.RTPCodecCapability
+		if remote.Kind() == webrtc.RTPCodecTypeVideo {
+			m.pubVideoSSRC = uint32(remote.SSRC())
+		} else if remote.Kind() == webrtc.RTPCodecTypeAudio {
+			m.pubAudioSSRC = uint32(remote.SSRC())
+		}
 		local, err := webrtc.NewTrackLocalStaticRTP(codec.RTPCodecCapability, remote.ID(), remote.StreamID())
 		if err != nil {
 			m.mu.Unlock()
@@ -201,14 +233,23 @@ func (m *Manager) HandlePublish(w http.ResponseWriter, r *http.Request) {
 		}()
 
 		for {
+			buf := rtpBufPool.Get().([]byte)
 			pkt, _, err := remote.ReadRTP()
 			if err != nil {
+				rtpBufPool.Put(buf)
 				slog.Info("publisher RTP read done", "error", err)
 				return
+			}
+			if remote.Kind() == webrtc.RTPCodecTypeVideo && isKeyframe(codec.MimeType, pkt.Payload) {
+				kf := *pkt
+				kf.Payload = make([]byte, len(pkt.Payload))
+				copy(kf.Payload, pkt.Payload)
+				m.SetLastKeyframe(&kf)
 			}
 			if werr := local.WriteRTP(pkt); werr != nil {
 				slog.Error("local track write", "error", werr)
 			}
+			rtpBufPool.Put(buf)
 		}
 	})
 
@@ -306,43 +347,51 @@ func (m *Manager) HandleSubscribe(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var addedTrack bool
-	if m.localVideoTrack != nil {
-		sender, err := pc.AddTrack(m.localVideoTrack)
-		if err != nil {
-			pc.Close()
-			m.mu.Unlock()
-			slog.Error("add video track for subscriber", "subscriber", id, "error", err)
-			return
-		}
-		addedTrack = true
-		go func() {
-			buf := make([]byte, 1500)
-			for {
-				if _, _, err := sender.Read(buf); err != nil {
-					return
-				}
+		if m.localVideoTrack != nil {
+			sender, err := pc.AddTrack(m.localVideoTrack)
+			if err != nil {
+				pc.Close()
+				m.mu.Unlock()
+				slog.Error("add video track for subscriber", "subscriber", id, "error", err)
+				return
 			}
-		}()
-	}
+			addedTrack = true
+			go func() {
+				buf := make([]byte, 1500)
+				for {
+					n, _, err := sender.Read(buf)
+					if err != nil {
+						return
+					}
+					if pkts, err := rtcp.Unmarshal(buf[:n]); err == nil {
+						m.ForwardRTCPToPublisher(pkts)
+					}
+				}
+			}()
+		}
 
-	if m.localAudioTrack != nil {
-		sender, err := pc.AddTrack(m.localAudioTrack)
-		if err != nil {
-			pc.Close()
-			m.mu.Unlock()
-			slog.Error("add audio track for subscriber", "subscriber", id, "error", err)
-			return
-		}
-		addedTrack = true
-		go func() {
-			buf := make([]byte, 1500)
-			for {
-				if _, _, err := sender.Read(buf); err != nil {
-					return
-				}
+		if m.localAudioTrack != nil {
+			sender, err := pc.AddTrack(m.localAudioTrack)
+			if err != nil {
+				pc.Close()
+				m.mu.Unlock()
+				slog.Error("add audio track for subscriber", "subscriber", id, "error", err)
+				return
 			}
-		}()
-	}
+			addedTrack = true
+			go func() {
+				buf := make([]byte, 1500)
+				for {
+					n, _, err := sender.Read(buf)
+					if err != nil {
+						return
+					}
+					if pkts, err := rtcp.Unmarshal(buf[:n]); err == nil {
+						m.ForwardRTCPToPublisher(pkts)
+					}
+				}
+			}()
+		}
 
 	if !addedTrack {
 		pc.Close()
@@ -354,6 +403,13 @@ func (m *Manager) HandleSubscribe(w http.ResponseWriter, r *http.Request) {
 	m.subPCs[id] = pc
 	m.subCount.Add(1)
 	m.mu.Unlock()
+
+	if kf := m.GetLastKeyframe(); kf != nil {
+		if m.localVideoTrack != nil {
+			_ = m.localVideoTrack.WriteRTP(kf)
+		}
+	}
+	go m.RequestKeyframe()
 
 	defer func() {
 		m.mu.Lock()

@@ -50,6 +50,9 @@ type Handler struct {
 	sessionCtx context.CancelFunc
 
 	sfu *sfu.Manager
+
+	cachedStats    atomic.Value
+	cachedStatsKey atomic.Value
 }
 
 func NewHandler() *Handler {
@@ -138,13 +141,22 @@ func (h *Handler) IncrementFrames(n uint64) {
 	h.framesPub.Add(n)
 }
 
-func (h *Handler) buildStatsResponse() StatsResponse {
-	return StatsResponse{
+func (h *Handler) buildStatsResponse() []byte {
+	key := fmt.Sprintf("%d-%d-%t-%s", h.framesPub.Load(), h.sfu.SubscriberCount(), h.sfu.IsActive(), h.sfu.GetMode())
+	if prev := h.cachedStatsKey.Load(); prev != nil && prev.(string) == key {
+		if cached := h.cachedStats.Load(); cached != nil {
+			return cached.([]byte)
+		}
+	}
+	data, _ := json.Marshal(StatsResponse{
 		FramesPublished: h.framesPub.Load(),
 		WebSubscribers:  h.sfu.SubscriberCount(),
 		SessionActive:   h.sfu.IsActive(),
 		StreamMode:      h.sfu.GetMode(),
-	}
+	})
+	h.cachedStatsKey.Store(key)
+	h.cachedStats.Store(data)
+	return data
 }
 
 func (h *Handler) HandlePresets(w http.ResponseWriter, r *http.Request) {
@@ -162,7 +174,7 @@ func (h *Handler) HandleStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(h.buildStatsResponse())
+	w.Write(h.buildStatsResponse())
 }
 
 func (h *Handler) HandleStatsStream(w http.ResponseWriter, r *http.Request) {
@@ -186,10 +198,7 @@ func (h *Handler) HandleStatsStream(w http.ResponseWriter, r *http.Request) {
 			slog.Info("stats stream disconnected", "remote", r.RemoteAddr)
 			return
 		case <-ticker.C:
-			data, err := json.Marshal(h.buildStatsResponse())
-			if err != nil {
-				continue
-			}
+			data := h.buildStatsResponse()
 			fmt.Fprintf(w, "data: %s\n\n", data)
 			flusher.Flush()
 		}
